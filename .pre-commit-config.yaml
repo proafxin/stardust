@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    - id: trailing-whitespace
+      exclude: scripts/migrations/
+    - id: end-of-file-fixer
+      exclude: scripts/migrations/
+    - id: check-yaml
+    - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.10
+    hooks:
+    - id: ruff-check
+      args: ["--config=pyproject.toml", "--fix", "--unsafe-fixes"]
+      exclude: scripts/migrations/
+    - id: ruff-format
+      args: ["--config=pyproject.toml"]
+      exclude: scripts/migrations/
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.9.4
+    hooks:
+    - id: bandit
+      args: ["-c", "pyproject.toml"]
+      additional_dependencies: ["bandit[toml]"]
