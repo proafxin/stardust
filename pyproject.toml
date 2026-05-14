@@ -6,6 +6,7 @@ readme = "README.md"
 authors = [{ name = "Masum Billal", email = "billalmasum93@gmail.com" }]
 requires-python = ">=3.13"
 dependencies = [
+    "datasets>=4.8.5",
     "en-core-web-trf>=3.8.0",
     "fastapi[standard]>=0.136.1",
     "google-genai>=2.2.0",
