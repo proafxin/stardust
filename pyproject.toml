@@ -7,6 +7,7 @@ authors = [{ name = "Masum Billal", email = "billalmasum93@gmail.com" }]
 requires-python = ">=3.13"
 dependencies = [
     "en-core-web-trf>=3.8.0",
+    "sentence-transformers>=5.5.0",
     "spacy>=3.8.14",
     "spacy-transformers>=1.4.0",
 ]
