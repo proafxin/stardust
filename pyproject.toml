@@ -8,9 +8,13 @@ requires-python = ">=3.13"
 dependencies = [
     "en-core-web-trf>=3.8.0",
     "fastapi[standard]>=0.136.1",
+    "google-genai>=2.2.0",
+    "groq>=1.2.0",
+    "pydantic-settings>=2.14.1",
     "sentence-transformers>=5.5.0",
     "spacy>=3.8.14",
     "spacy-transformers>=1.4.0",
+    "sqlalchemy[asyncio]>=2.0.49",
 ]
 
 
