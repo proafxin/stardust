@@ -1,38 +1,35 @@
-from __future__ import annotations
-
 import spacy
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from spacy.language import Language
 
-from config import EMBEDDING_MODEL, RERANKER_MODEL, SPACY_MODEL
-
-_nlp: Language | None = None
-_embedder: SentenceTransformer | None = None
-_reranker: CrossEncoder | None = None
+from stardust.config import EMBEDDING_MODEL, RERANKER_MODEL, SPACY_MODEL
 
 
-def get_nlp() -> Language:
-    global _nlp
-    if _nlp is None:
-        _nlp = spacy.load(SPACY_MODEL)
-    return _nlp
+class Registry:
+    def __init__(self) -> None:
+        self._nlp: Language | None = None
+        self._embedder: SentenceTransformer | None = None
+        self._reranker: CrossEncoder | None = None
+
+    def nlp(self) -> Language:
+        if self._nlp is None:
+            self._nlp = spacy.load(SPACY_MODEL)
+        return self._nlp
+
+    def embedder(self) -> SentenceTransformer:
+        if self._embedder is None:
+            self._embedder = SentenceTransformer(EMBEDDING_MODEL)
+        return self._embedder
+
+    def reranker(self) -> CrossEncoder:
+        if self._reranker is None:
+            self._reranker = CrossEncoder(RERANKER_MODEL)
+        return self._reranker
+
+    def warm_up(self) -> None:
+        self.nlp()
+        self.embedder()
+        self.reranker()
 
 
-def get_embedder() -> SentenceTransformer:
-    global _embedder
-    if _embedder is None:
-        _embedder = SentenceTransformer(EMBEDDING_MODEL)
-    return _embedder
-
-
-def get_reranker() -> CrossEncoder:
-    global _reranker
-    if _reranker is None:
-        _reranker = CrossEncoder(RERANKER_MODEL)
-    return _reranker
-
-
-def warm_up() -> None:
-    get_nlp()
-    get_embedder()
-    get_reranker()
+registry = Registry()

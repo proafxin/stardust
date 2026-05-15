@@ -1,16 +1,11 @@
-from __future__ import annotations
-
 import operator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
-
 from config import RRF_K
-from stardust.registry import get_embedder, get_reranker
 
-if TYPE_CHECKING:
-    from stardust.tree.atom import AtomIndex, Node
+from stardust.registry import get_embedder, get_reranker
+from stardust.tree.atom import AtomIndex, Node
 
 
 @dataclass

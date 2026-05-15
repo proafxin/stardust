@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from bisect import bisect_left, bisect_right
 
 from stardust.tree.atom import AtomIndex, Node, SpanOffset
@@ -37,11 +35,7 @@ class IntervalTree:
     def find_overlapping(self, start: int, end: int) -> list[Node]:
         lo = bisect_left(self._ends, start)
         hi = bisect_right(self._starts, end)
-        return [
-            self._atoms[i]
-            for i in range(lo, hi)
-            if self._starts[i] < end and self._ends[i] > start
-        ]
+        return [self._atoms[i] for i in range(lo, hi) if self._starts[i] < end and self._ends[i] > start]
 
 
 def get_ancestors(node_id: int, index: AtomIndex) -> list[Node]:

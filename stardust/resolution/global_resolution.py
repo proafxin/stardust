@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 from collections import defaultdict
 
 import numpy as np
-
 from config import GLOBAL_MERGE_THRESHOLD
+
 from stardust.registry import get_embedder
-from stardust.tree.atom import AtomIndex, SpanOffset
+from stardust.tree.atom import SpanOffset
 
 
 class CanonicalEntity:
@@ -44,9 +42,7 @@ def resolve_global(
             ]
             for j in range(i + 1, len(clusters)):
                 if not merged[j] and float(np.dot(vecs[i], vecs[j])) >= GLOBAL_MERGE_THRESHOLD:
-                    merged_mentions.extend(
-                        (text, offset, atom_id, doc_id) for text, offset, atom_id in clusters[j]
-                    )
+                    merged_mentions.extend((text, offset, atom_id, doc_id) for text, offset, atom_id in clusters[j])
                     merged[j] = True
             canonical_entities.append(CanonicalEntity(ent_type, merged_mentions))
 
