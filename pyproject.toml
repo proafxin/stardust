@@ -9,7 +9,7 @@ dependencies = [
     "datasets>=4.8.5",
     "en-core-web-trf>=3.8.0",
     "fastapi[standard]>=0.136.1",
-    "google-genai>=2.2.0",
+    "google-genai>=2.3.0",
     "groq>=1.2.0",
     "pillow>=12.2.0",
     "pydantic-settings>=2.14.1",
@@ -74,6 +74,7 @@ ignore = [
     "PLR6301", # could be method or static
     "TRY003", # long message outside exception
     "EM101", # exception literal
+    "INP001", # implicit namespace package
 ]
 
 # [tool.ruff.format]
@@ -95,7 +96,7 @@ ban-relative-imports = "all"
 ]
 
 [tool.bandit]
-exclude_dirs = ['tests', '.venv', 'venv', 'alembic']
+exclude_dirs = ['tests', '.venv', 'venv', 'alembic', 'scripts']
 
 [tool.bandit.assert_used]
 skips = ['*_test.py', '*/test_*.py', 'tests/*', '.venv/*', 'venv/*']
