@@ -3,7 +3,7 @@ from collections import defaultdict
 import numpy as np
 
 from stardust.config import ENTITY_MERGE_THRESHOLD
-from stardust.registry import get_embedder
+from stardust.registry import embedder as load_embedder
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
 _EQUIVALENT_TYPES: dict[str, str] = {
@@ -67,9 +67,7 @@ def _cluster_by_embedding(
 ) -> list[list[tuple[str, SpanOffset, int]]]:
     if not items:
         return []
-    embedder = get_embedder()
-    texts = [item[0] for item in items]
-    vecs = embedder.encode(texts, normalize_embeddings=True)
+    vecs = load_embedder().encode(texts, normalize_embeddings=True)
     clusters: list[list[int]] = []
     assigned = [False] * len(items)
     for i in range(len(items)):

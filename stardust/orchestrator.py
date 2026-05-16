@@ -1,9 +1,8 @@
-
 import json
 import logging
 
 from stardust.extract import extract
-from stardust.llm import groq_complete
+from stardust.llm import async_groq_complete
 from stardust.parse import Document, build_atom_index
 from stardust.resolution.global_resolution import CanonicalEntity, merge_across_documents
 from stardust.resolution.local import build_pronoun_prompt, resolve_local
@@ -21,7 +20,7 @@ def _parse_pronoun_map(raw: str) -> list[dict]:
         return []
 
 
-def index_documents(
+async def index_documents(
     docs: list[Document],
     doc_id: str,
     all_doc_clusters: list[tuple[str, dict]] | None = None,
@@ -33,16 +32,13 @@ def index_documents(
     log.info("nlp extraction complete")
 
     prompt = build_pronoun_prompt(index)
-    pronoun_map = _parse_pronoun_map(groq_complete(prompt)) if prompt.strip() else []
+    pronoun_map = _parse_pronoun_map(await async_groq_complete(prompt)) if prompt.strip() else []
     log.info("pronoun resolution: %d mappings", len(pronoun_map))
 
     clusters = resolve_local(index, pronoun_map)
     log.info("local resolution: %d entity types", len(clusters))
 
-    per_doc = [(doc_id, clusters)]
-    if all_doc_clusters:
-        per_doc = all_doc_clusters + per_doc
-
+    per_doc = (all_doc_clusters or []) + [(doc_id, clusters)]
     global_entities = merge_across_documents(per_doc)
     log.info("global resolution: %d canonical entities", len(global_entities))
 

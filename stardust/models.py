@@ -1,6 +1,9 @@
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+EMBEDDING_DIM = 1024
 
 
 class Base(DeclarativeBase):
@@ -23,7 +26,9 @@ class TreeNodeModel(Base):
     disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     children: Mapped[list[TreeNodeModel]] = relationship("TreeNodeModel", back_populates="parent")
-    parent: Mapped[TreeNodeModel | None] = relationship("TreeNodeModel", back_populates="children", remote_side=[id])
+    parent: Mapped[TreeNodeModel | None] = relationship(
+        "TreeNodeModel", back_populates="children", remote_side=[id]
+    )
 
 
 class AtomModel(Base):
@@ -38,9 +43,12 @@ class AtomModel(Base):
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default={})
     nlp_attributes: Mapped[list] = mapped_column(JSONB, default=[])
     disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    embedding: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
 
-    __table_args__ = (Index("ix_atoms_doc_id", "doc_id"),)
+    __table_args__ = (
+        Index("ix_atoms_doc_id", "doc_id"),
+        Index("ix_atoms_embedding", "embedding", postgresql_using="hnsw", postgresql_with={"m": 16, "ef_construction": 64}),
+    )
 
 
 class CanonicalEntityModel(Base):
@@ -51,7 +59,9 @@ class CanonicalEntityModel(Base):
     entity_type: Mapped[str] = mapped_column(String(64))
     aliases: Mapped[list] = mapped_column(JSONB, default=[])
 
-    mentions: Mapped[list[EntityMentionModel]] = relationship("EntityMentionModel", back_populates="canonical_entity")
+    mentions: Mapped[list[EntityMentionModel]] = relationship(
+        "EntityMentionModel", back_populates="canonical_entity"
+    )
 
 
 class EntityMentionModel(Base):
@@ -60,7 +70,9 @@ class EntityMentionModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"))
     doc_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    canonical_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("canonical_entities.id"), nullable=True)
+    canonical_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("canonical_entities.id"), nullable=True
+    )
     text: Mapped[str] = mapped_column(Text)
     entity_type: Mapped[str] = mapped_column(String(64))
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)

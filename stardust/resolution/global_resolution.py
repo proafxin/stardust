@@ -1,9 +1,9 @@
 from collections import defaultdict
 
 import numpy as np
-from config import GLOBAL_MERGE_THRESHOLD
 
-from stardust.registry import get_embedder
+from stardust.config import GLOBAL_MERGE_THRESHOLD
+from stardust.registry import embedder as load_embedder
 from stardust.tree.atom import SpanOffset
 
 
@@ -23,7 +23,7 @@ def resolve_global(
     local_clusters: dict[str, list[list[tuple[str, SpanOffset, int]]]],
     doc_id: str,
 ) -> list[CanonicalEntity]:
-    embedder = get_embedder()
+    embedder = load_embedder()
     canonical_entities: list[CanonicalEntity] = []
 
     for ent_type, clusters in local_clusters.items():
@@ -52,7 +52,7 @@ def resolve_global(
 def merge_across_documents(
     per_doc: list[tuple[str, dict[str, list[list[tuple[str, SpanOffset, int]]]]]],
 ) -> list[CanonicalEntity]:
-    embedder = get_embedder()
+    embedder = load_embedder()
     by_type: dict[str, list[tuple[str, list[tuple[str, SpanOffset, int, str]]]]] = defaultdict(list)
 
     for doc_id, clusters in per_doc:

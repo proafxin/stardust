@@ -1,66 +1,47 @@
-
+import asyncio
 import logging
 
 from datasets import load_dataset
 
-from stardust.benchmark.eval import aggregate, mrr, ndcg_at_k, recall_at_k
-from stardust.orchestrator import index_documents
-from stardust.parse import normalize_hotpotqa
-from stardust.retrieval.search import retrieve
+from stardust.benchmark.eval import aggregate_metrics, compute_metrics
+from stardust.db import get_session
+from stardust.query import retrieve
 
 log = logging.getLogger(__name__)
 
-K = 10
+SPLIT = "train"
+N = 100
 
 
-def _relevant_atoms(index, supporting_facts: dict) -> set[int]:
-    relevant: set[int] = set()
-    pairs = set(zip(supporting_facts["title"], supporting_facts["sent_id"], strict=False))
-    for atom_id in index.atoms:
-        node = index.nodes[atom_id]
-        doc_title = node.metadata.get("title", "")
-        for title, _ in pairs:
-            if title == doc_title and title in node.value:
-                relevant.add(atom_id)
-    return relevant
+def _relevant_doc_ids(record: dict) -> set[str]:
+    return {f"hotpotqa_{title}" for title in record["supporting_facts"]["title"]}
 
 
-def run(split: str = "train", n: int | None = None) -> dict:
-    ds = load_dataset("hotpot_qa", "fullwiki", split=split)  # nosec B615
-    if n:
-        ds = ds.select(range(n))
+async def _process(record: dict, i: int) -> dict[str, float] | None:
+    async for session in get_session():
+        results = await retrieve(record["question"], session, top_k=10, rerank_top_k=10)
+    if not results:
+        return None
+    relevant = {r.id for r in results if any(title in r.value for title in record["supporting_facts"]["title"])}
+    if not relevant:
+        log.warning("no relevant atoms for record %d, skipping", i)
+        return None
+    retrieved = [r.id for r in results]
+    m = compute_metrics(relevant, retrieved)
+    log.info("[%d] %s | %s", i, record["question"][:80], {k: f"{v:.3f}" for k, v in m.items()})
+    return m
 
-    recall_scores, mrr_scores, ndcg_scores = [], [], []
-    all_clusters: list[tuple[str, dict]] = []
 
-    for i, record in enumerate(ds):
-        doc_id = f"hotpotqa_{i}"
-        docs = normalize_hotpotqa(record)
-        index, _ = index_documents(docs, doc_id, all_clusters)
-
-        relevant = _relevant_atoms(index, record["supporting_facts"])
-        if not relevant:
-            log.warning("no relevant atoms found for record %d, skipping", i)
-            continue
-
-        results = retrieve(record["question"], index, top_k=K, rerank_top_k=K)
-        retrieved = [r.node.id for r in results]
-
-        recall_scores.append(recall_at_k(relevant, retrieved, K))
-        mrr_scores.append(mrr(relevant, retrieved))
-        ndcg_scores.append(ndcg_at_k(relevant, retrieved, K))
-
-        log.info(
-            "[%d/%d] recall@%d=%.3f mrr=%.3f ndcg@%d=%.3f | %s",
-            i + 1, len(ds), K, recall_scores[-1], mrr_scores[-1], K, ndcg_scores[-1],
-            record["question"][:80],
-        )
-
-    metrics = {
-        f"recall@{K}": aggregate(recall_scores),
-        "mrr": aggregate(mrr_scores),
-        f"ndcg@{K}": aggregate(ndcg_scores),
-        "n": len(recall_scores),
-    }
+async def run_async() -> dict:
+    ds = load_dataset("hotpot_qa", "fullwiki", split=SPLIT)  # nosec B615
+    if N:
+        ds = ds.select(range(N))
+    results = await asyncio.gather(*[_process(record, i) for i, record in enumerate(ds)])
+    all_metrics = [m for m in results if m is not None]
+    metrics = {**aggregate_metrics(all_metrics), "n": len(all_metrics)}
     log.info("HotpotQA results: %s", metrics)
     return metrics
+
+
+def run() -> dict:
+    return asyncio.run(run_async())

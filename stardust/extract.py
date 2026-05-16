@@ -1,13 +1,15 @@
-from stardust.registry import get_nlp
+from stardust.registry import nlp as load_nlp
 from stardust.tree.atom import AtomIndex, SpanOffset, TokenAttributes
 
 
 def extract(index: AtomIndex) -> None:
-    nlp = get_nlp()
-    for atom_id in index.atoms:
+    nlp_model = load_nlp()
+    atom_ids = index.atoms
+    texts = [index.nodes[a].value for a in atom_ids]
+
+    for atom_id, doc in zip(atom_ids, nlp_model.pipe(texts), strict=False):
         node = index.nodes[atom_id]
-        doc = nlp(node.value)
-        attrs: list[TokenAttributes] = [
+        node.nlp_attributes = [
             TokenAttributes(
                 text=token.text,
                 pos_=token.pos_,
@@ -22,4 +24,3 @@ def extract(index: AtomIndex) -> None:
             )
             for token in doc
         ]
-        node.nlp_attributes = attrs

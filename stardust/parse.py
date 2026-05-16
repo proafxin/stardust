@@ -12,7 +12,10 @@ from stardust.tree.atom import AtomIndex, Modality, Node, NodeType, SpanOffset
 class Section(BaseModel):
     heading: str | None
     paragraphs: list[str]
-    subsections: list[Section] = []
+    subsections: list["Section"] = []
+
+
+Section.model_rebuild()
 
 
 class Document(BaseModel):
