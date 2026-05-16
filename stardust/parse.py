@@ -57,14 +57,16 @@ def _make_node(
     )
 
 
-async def normalize_hotpotqa(record: dict[str, Any]) -> AsyncGenerator[tuple[Node, bool], None]:
+async def normalize_hotpotqa(record: dict[str, Any]) -> AsyncGenerator[tuple[Node, bool]]:
     corpus_level, doc_level, atom_level = HOTPOTQA_LEVELS
     counter = 0
     raw_pos = clean_pos = 0
 
     corpus_text = "hotpotqa"
     corpus_clean, _ = _clean(corpus_text)
-    corpus_node = _make_node(counter, corpus_level, corpus_clean, raw_pos, len(corpus_text), clean_pos, len(corpus_clean), None)
+    corpus_node = _make_node(
+        counter, corpus_level, corpus_clean, raw_pos, len(corpus_text), clean_pos, len(corpus_clean), None
+    )
     counter += 1
     raw_pos += len(corpus_text)
     clean_pos += len(corpus_clean)
@@ -73,7 +75,9 @@ async def normalize_hotpotqa(record: dict[str, Any]) -> AsyncGenerator[tuple[Nod
     for title, sentences in zip(record["context"]["title"], record["context"]["sentences"], strict=False):
         doc_clean, _ = _clean(title)
         doc_value = f"{corpus_clean} | {doc_clean}"
-        doc_node = _make_node(counter, doc_level, doc_value, raw_pos, len(title), clean_pos, len(doc_clean), corpus_node.id)
+        doc_node = _make_node(
+            counter, doc_level, doc_value, raw_pos, len(title), clean_pos, len(doc_clean), corpus_node.id
+        )
         counter += 1
         raw_pos += len(title)
         clean_pos += len(doc_clean)
@@ -82,7 +86,7 @@ async def normalize_hotpotqa(record: dict[str, Any]) -> AsyncGenerator[tuple[Nod
         buffer: list[str] = []
         buffer_tokens = 0
 
-        async def flush_hotpotqa(buf: list[str], parent_id: int) -> AsyncGenerator[tuple[Node, bool], None]:
+        async def flush_hotpotqa(buf: list[str], parent_id: int, doc_value: str = doc_value) -> AsyncGenerator[tuple[Node, bool]]:
             nonlocal counter, raw_pos, clean_pos
             if not buf:
                 return
@@ -108,7 +112,7 @@ async def normalize_hotpotqa(record: dict[str, Any]) -> AsyncGenerator[tuple[Nod
             yield item
 
 
-async def normalize_qasper(record: dict[str, Any]) -> AsyncGenerator[tuple[Node, bool], None]:
+async def normalize_qasper(record: dict[str, Any]) -> AsyncGenerator[tuple[Node, bool]]:
     doc_level, atom_level = QASPER_LEVELS
     counter = 0
     raw_pos = clean_pos = 0
@@ -126,7 +130,7 @@ async def normalize_qasper(record: dict[str, Any]) -> AsyncGenerator[tuple[Node,
     buffer: list[str] = []
     buffer_tokens = 0
 
-    async def flush_qasper(buf: list[str]) -> AsyncGenerator[tuple[Node, bool], None]:
+    async def flush_qasper(buf: list[str]) -> AsyncGenerator[tuple[Node, bool]]:
         nonlocal counter, raw_pos, clean_pos
         if not buf:
             return
@@ -152,7 +156,9 @@ async def normalize_qasper(record: dict[str, Any]) -> AsyncGenerator[tuple[Node,
         yield item
 
 
-async def normalize_crag(record: dict[str, Any], groundingdata: dict[str, Any] | None = None) -> AsyncGenerator[tuple[Node, bool], None]:
+async def normalize_crag(
+    record: dict[str, Any], groundingdata: dict[str, Any] | None = None
+) -> AsyncGenerator[tuple[Node, bool]]:
     corpus_level, page_level, section_level, atom_level = CRAG_LEVELS
     counter = 0
     raw_pos = clean_pos = 0
@@ -160,7 +166,9 @@ async def normalize_crag(record: dict[str, Any], groundingdata: dict[str, Any] |
     domain = record.get("domain", "unknown")
     corpus_text = f"crag_{domain}"
     corpus_clean, _ = _clean(corpus_text)
-    corpus_node = _make_node(counter, corpus_level, corpus_clean, raw_pos, len(corpus_text), clean_pos, len(corpus_clean), None)
+    corpus_node = _make_node(
+        counter, corpus_level, corpus_clean, raw_pos, len(corpus_text), clean_pos, len(corpus_clean), None
+    )
     counter += 1
     raw_pos += len(corpus_text)
     clean_pos += len(corpus_clean)
@@ -168,9 +176,15 @@ async def normalize_crag(record: dict[str, Any], groundingdata: dict[str, Any] |
 
     if groundingdata:
         async for item in _normalize_crag_markdown(
-            groundingdata, corpus_clean, corpus_node.id,
-            page_level, section_level, atom_level,
-            counter, raw_pos, clean_pos,
+            groundingdata,
+            corpus_clean,
+            corpus_node.id,
+            page_level,
+            section_level,
+            atom_level,
+            counter,
+            raw_pos,
+            clean_pos,
         ):
             yield item
     else:
@@ -181,7 +195,9 @@ async def normalize_crag(record: dict[str, Any], groundingdata: dict[str, Any] |
             page_name = sr.get("page_name", "")[:200]
             page_clean, _ = _clean(page_name)
             page_value = f"{corpus_clean} | {page_clean}"
-            page_node = _make_node(counter, page_level, page_value, raw_pos, len(page_name), clean_pos, len(page_clean), corpus_node.id)
+            page_node = _make_node(
+                counter, page_level, page_value, raw_pos, len(page_name), clean_pos, len(page_clean), corpus_node.id
+            )
             counter += 1
             raw_pos += len(page_name)
             clean_pos += len(page_clean)
@@ -189,7 +205,9 @@ async def normalize_crag(record: dict[str, Any], groundingdata: dict[str, Any] |
 
             clean_snippet, _ = _clean(snippet)
             atom_value = f"{page_value} | {clean_snippet}"
-            atom_node = _make_node(counter, atom_level, atom_value, raw_pos, len(snippet), clean_pos, len(clean_snippet), page_node.id)
+            atom_node = _make_node(
+                counter, atom_level, atom_value, raw_pos, len(snippet), clean_pos, len(clean_snippet), page_node.id
+            )
             counter += 1
             raw_pos += len(snippet)
             clean_pos += len(clean_snippet)
@@ -206,11 +224,13 @@ async def _normalize_crag_markdown(
     counter: int,
     raw_pos: int,
     clean_pos: int,
-) -> AsyncGenerator[tuple[Node, bool], None]:
+) -> AsyncGenerator[tuple[Node, bool]]:
     filename = groundingdata.get("filename", "")[:200]
     page_clean, _ = _clean(filename)
     page_value = f"{corpus_value} | {page_clean}"
-    page_node = _make_node(counter, page_level, page_value, raw_pos, len(filename), clean_pos, len(page_clean), corpus_id)
+    page_node = _make_node(
+        counter, page_level, page_value, raw_pos, len(filename), clean_pos, len(page_clean), corpus_id
+    )
     counter += 1
     raw_pos += len(filename)
     clean_pos += len(page_clean)
@@ -221,14 +241,16 @@ async def _normalize_crag_markdown(
     buffer: list[str] = []
     buffer_tokens = 0
 
-    async def flush_md(buf: list[str]) -> AsyncGenerator[tuple[Node, bool], None]:
+    async def flush_md(buf: list[str]) -> AsyncGenerator[tuple[Node, bool]]:
         nonlocal counter, raw_pos, clean_pos
         if not buf:
             return
         combined = " ".join(buf)
         clean_text, _ = _clean(combined)
         value = f"{current_section_value} | {clean_text}"
-        node = _make_node(counter, atom_level, value, raw_pos, len(combined), clean_pos, len(clean_text), current_section_id)
+        node = _make_node(
+            counter, atom_level, value, raw_pos, len(combined), clean_pos, len(clean_text), current_section_id
+        )
         counter += 1
         raw_pos += len(combined)
         clean_pos += len(clean_text)
@@ -246,7 +268,16 @@ async def _normalize_crag_markdown(
             heading = stripped.lstrip("#").strip()
             sec_clean, _ = _clean(heading)
             current_section_value = f"{page_value} | {sec_clean}"
-            sec_node = _make_node(counter, section_level, current_section_value, raw_pos, len(heading), clean_pos, len(sec_clean), page_node.id)
+            sec_node = _make_node(
+                counter,
+                section_level,
+                current_section_value,
+                raw_pos,
+                len(heading),
+                clean_pos,
+                len(sec_clean),
+                page_node.id,
+            )
             current_section_id = sec_node.id
             counter += 1
             raw_pos += len(heading)

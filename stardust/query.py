@@ -19,10 +19,11 @@ class RankedAtom:
 
 
 async def insert_index(nodes: list[Node], atoms: list[int], doc_id: str, session: AsyncSession) -> None:
+    atom_set = set(atoms)
     await session.run_sync(lambda s: s.bulk_save_objects([
         TreeNodeModel(
             id=node.id, doc_id=doc_id, parent_id=node.parent_id,
-            node_type=node.node_type, modality=node.modality, value=node.value,
+            node_type=node.node_type, modality=node.modality.value, value=node.value,
             raw_offset=node.raw_offset.model_dump(), clean_offset=node.clean_offset.model_dump(),
             nlp_attributes=[], disambiguation=None,
         ) for node in nodes
@@ -32,7 +33,7 @@ async def insert_index(nodes: list[Node], atoms: list[int], doc_id: str, session
             id=node.id, doc_id=doc_id, parent_id=node.parent_id, value=node.value,
             raw_offset=node.raw_offset.model_dump(), clean_offset=node.clean_offset.model_dump(),
             nlp_attributes=[], disambiguation=None, embedding=None,
-        ) for node in nodes if node.id in set(atoms)
+        ) for node in nodes if node.id in atom_set
     ]))
     await session.commit()
 
