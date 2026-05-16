@@ -14,6 +14,8 @@ from stardust.models import AtomModel
 from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
+from stardust.registry import nlp as load_nlp
+from stardust.registry import unload_nlp
 from stardust.resolution.global_resolution import merge_across_documents
 from stardust.resolution.local import (
     _pronoun_spans,
@@ -259,12 +261,23 @@ async def phase_disambiguation() -> None:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-async def main() -> None:
-    await phase_normalize()
+async def main(skip_normalize: bool = False) -> None:
+    if not skip_normalize:
+        await phase_normalize()
+    log.info("loading nlp model")
+    load_nlp()
     await phase_nlp()
+    log.info("unloading nlp model")
+    unload_nlp()
+    log.info("loading embedding model")
+    load_embedder()
     await phase_llm()
     await phase_disambiguation()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--skip-normalize", action="store_true", help="skip phase 1, assume DB is already populated")
+    args = parser.parse_args()
+    asyncio.run(main(skip_normalize=args.skip_normalize))
