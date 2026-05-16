@@ -31,7 +31,7 @@ N = 100
 
 DATASETS: list[tuple[str, Path, str]] = [
     ("hotpotqa", DATA_DIR / "hotpotqa" / "corpus.parquet", "hotpotqa"),
-    ("qasper", DATA_DIR / "qasper" / "train.parquet", "qasper"),
+    # ("qasper", DATA_DIR / "qasper" / "train.parquet", "qasper"),  # TODO: fix chunking
     ("crag_open", DATA_DIR / "crag" / "open" / "train.parquet", "crag_open"),
 ]
 

@@ -142,7 +142,7 @@ async def normalize_qasper(record: dict[str, Any], start_id: int = 0) -> AsyncGe
     state = _State(counter=start_id)
 
     context: str = record.get("context", "")
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", context) if p.strip()]
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", context) if s.strip()]
 
     doc_clean, _ = _clean("qasper_paper")
     doc_node = _make_node(
@@ -155,7 +155,7 @@ async def normalize_qasper(record: dict[str, Any], start_id: int = 0) -> AsyncGe
 
     buffer: list[str] = []
     buffer_tokens = 0
-    for para in paragraphs:
+    for para in sentences:
         tokens = _token_count(para)
         if buffer_tokens + tokens > ATOM_TOKEN_LIMIT and buffer:
             async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.id, state):
