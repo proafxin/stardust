@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import tiktoken
 from sqlalchemy import select, update
 
 from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE
@@ -38,8 +39,11 @@ DATASETS: list[tuple[str, Path, str]] = [
 ]
 
 
+_enc = tiktoken.get_encoding("cl100k_base")
+
+
 def _token_count(text: str) -> int:
-    return len(text.split())
+    return len(_enc.encode(text))
 
 
 # ── Phase 1: Normalize and persist ──────────────────────────────────────────
@@ -118,7 +122,7 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]]) -> list[dict]:
     if not atom_data:
         return []
     prompt = build_batch_prompt(atom_data)
-    raw = await async_gemini_complete(prompt)
+    raw = await async_gemini_complete(prompt, max_tokens=max(500, len(atom_data) * 50))
     try:
         start, end = raw.find("["), raw.rfind("]") + 1
         return json.loads(raw[start:end]) if start != -1 and end > 0 else []
@@ -138,7 +142,8 @@ async def phase_llm() -> None:
     current: list[tuple[int, str, list]] = []
     current_tokens = 0
     for row in rows:
-        tokens = _token_count(row.value)
+        entry = build_pronoun_prompt(row.id, row.value, [TokenAttributes(**a) for a in (row.nlp_attributes or [])])
+        tokens = _token_count(json.dumps(entry)) if entry else _token_count(row.value)
         if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT and current:
             batches.append(current)
             current, current_tokens = [], 0
@@ -149,8 +154,10 @@ async def phase_llm() -> None:
 
     log.info("phase 3: %d batches", len(batches))
 
-    # process batches concurrently
-    results = await asyncio.gather(*[_process_llm_batch(b) for b in batches])
+    # process batches sequentially to stay within free tier RPM
+    results = []
+    for batch in batches:
+        results.append(await _process_llm_batch(batch))
 
     async with SessionLocal() as session:
         for batch, pronoun_map in zip(batches, results, strict=False):
