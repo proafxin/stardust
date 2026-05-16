@@ -9,13 +9,13 @@ from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BAT
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import async_groq_complete
-from stardust.models import AtomModel, TreeNodeModel
+from stardust.models import AtomModel
 from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
 from stardust.resolution.global_resolution import merge_across_documents
 from stardust.resolution.local import (
-    attach_pronoun_resolutions,
+    _pronoun_spans,
     build_batch_prompt,
     build_pronoun_prompt,
     resolve_local,
@@ -36,6 +36,7 @@ def _token_count(text: str) -> int:
 
 # ── Phase 1: Normalize and persist ──────────────────────────────────────────
 
+
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
     if DATASET == "hotpotqa":
@@ -55,10 +56,10 @@ async def phase_normalize() -> None:
         doc_id = f"{id_prefix}_{i}"
         nodes: list[Node] = []
         atoms: list[int] = []
-        async for node, is_atom in normalizer(record):
-            nodes.append(node)
-            if is_atom:
-                atoms.append(node.id)
+        async for parsed in normalizer(record):
+            nodes.append(parsed.node)
+            if parsed.is_atom:
+                atoms.append(parsed.node.id)
         async with SessionLocal() as session:
             await insert_index(nodes, atoms, doc_id, session)
         if i % 10 == 0:
@@ -66,6 +67,7 @@ async def phase_normalize() -> None:
 
 
 # ── Phase 2: NLP extraction ──────────────────────────────────────────────────
+
 
 async def phase_nlp() -> None:
     log.info("phase 2: nlp extraction")
@@ -76,7 +78,7 @@ async def phase_nlp() -> None:
 
     total = len(rows)
     for batch_start in range(0, total, NLP_BATCH_SIZE):
-        batch = rows[batch_start:batch_start + NLP_BATCH_SIZE]
+        batch = rows[batch_start : batch_start + NLP_BATCH_SIZE]
         atom_ids = [r.id for r in batch]
         texts = [r.value for r in batch]
         clean_starts = [r.clean_offset["start"] for r in batch]
@@ -94,6 +96,7 @@ async def phase_nlp() -> None:
 
 
 # ── Phase 3: LLM pronoun resolution ─────────────────────────────────────────
+
 
 async def _process_llm_batch(batch: list[tuple[int, str, list]]) -> list[dict]:
     atom_data = []
@@ -151,15 +154,18 @@ async def phase_llm() -> None:
                 _, _, nlp_attrs = atom_lookup[atom_id]
                 attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
                 offset_val = entry.get("offset", [])
-                from stardust.resolution.local import _pronoun_spans
                 matched = next(
                     (a for a in _pronoun_spans(attrs) if len(offset_val) == 2 and a.offset.start == offset_val[0]),
                     None,
                 )
                 if matched is None:
                     continue
-                resolution = {"offset": matched.offset.model_dump(), "pronoun": entry.get("pronoun", matched.text),
-                              "local_entity": entry.get("local_entity", ""), "confidence": float(entry.get("confidence", 1.0))}
+                resolution = {
+                    "offset": matched.offset.model_dump(),
+                    "pronoun": entry.get("pronoun", matched.text),
+                    "local_entity": entry.get("local_entity", ""),
+                    "confidence": float(entry.get("confidence", 1.0)),
+                }
                 result = await session.execute(select(AtomModel.disambiguation).where(AtomModel.id == atom_id))
                 existing = result.scalar_one_or_none() or {"pronoun_map": []}
                 existing["pronoun_map"].append(resolution)
@@ -170,6 +176,7 @@ async def phase_llm() -> None:
 
 
 # ── Phase 4: Disambiguation + embedding ─────────────────────────────────────
+
 
 async def _process_doc_disambiguation(doc_id: str) -> tuple[str, dict]:
     async with SessionLocal() as session:
@@ -182,9 +189,15 @@ async def _process_doc_disambiguation(doc_id: str) -> tuple[str, dict]:
         attrs = [TokenAttributes(**a) for a in (row.nlp_attributes or [])]
         disambig = DisambiguationMetadata(**row.disambiguation) if row.disambiguation else None
         nodes[row.id] = Node(
-            id=row.id, node_type="paragraph", modality="text", value=row.value,
-            raw_offset=SpanOffset(**row.raw_offset), clean_offset=SpanOffset(**row.clean_offset),
-            parent_id=row.parent_id, nlp_attributes=attrs, disambiguation=disambig,
+            id=row.id,
+            node_type="paragraph",
+            modality="text",
+            value=row.value,
+            raw_offset=SpanOffset(**row.raw_offset),
+            clean_offset=SpanOffset(**row.clean_offset),
+            parent_id=row.parent_id,
+            nlp_attributes=attrs,
+            disambiguation=disambig,
         )
         atoms.append(row.id)
 
@@ -215,11 +228,13 @@ async def phase_disambiguation() -> None:
     total = len(atom_ids)
 
     for batch_start in range(0, total, EMBEDDING_BATCH_SIZE):
-        batch_ids = atom_ids[batch_start:batch_start + EMBEDDING_BATCH_SIZE]
-        batch_texts = texts[batch_start:batch_start + EMBEDDING_BATCH_SIZE]
+        batch_ids = atom_ids[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
+        batch_texts = texts[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
         vecs = await asyncio.to_thread(
-            load_embedder().encode, batch_texts,
-            normalize_embeddings=True, show_progress_bar=False,
+            load_embedder().encode,
+            batch_texts,
+            normalize_embeddings=True,
+            show_progress_bar=False,
         )
         async with SessionLocal() as session:
             for atom_id, vec in zip(batch_ids, vecs, strict=False):
@@ -234,6 +249,7 @@ async def phase_disambiguation() -> None:
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+
 
 async def main() -> None:
     await phase_normalize()

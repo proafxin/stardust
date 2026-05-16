@@ -25,9 +25,7 @@ class TreeNodeModel(Base):
     disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     children: Mapped[list["TreeNodeModel"]] = relationship("TreeNodeModel", back_populates="parent")
-    parent: Mapped["TreeNodeModel | None"] = relationship(
-        "TreeNodeModel", back_populates="children", remote_side=[id]
-    )
+    parent: Mapped["TreeNodeModel | None"] = relationship("TreeNodeModel", back_populates="children", remote_side=[id])
 
 
 class AtomModel(Base):
@@ -45,7 +43,13 @@ class AtomModel(Base):
 
     __table_args__ = (
         Index("ix_atoms_doc_id", "doc_id"),
-        Index("ix_atoms_embedding", "embedding", postgresql_using="hnsw", postgresql_with={"m": 16, "ef_construction": 64}, postgresql_ops={"embedding": "vector_cosine_ops"}),
+        Index(
+            "ix_atoms_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
 
@@ -57,9 +61,7 @@ class CanonicalEntityModel(Base):
     entity_type: Mapped[str] = mapped_column(String(64))
     aliases: Mapped[list] = mapped_column(JSONB, default=[])
 
-    mentions: Mapped[list["EntityMentionModel"]] = relationship(
-        "EntityMentionModel", back_populates="canonical_entity"
-    )
+    mentions: Mapped[list["EntityMentionModel"]] = relationship("EntityMentionModel", back_populates="canonical_entity")
 
 
 class EntityMentionModel(Base):
@@ -68,9 +70,7 @@ class EntityMentionModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"))
     doc_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    canonical_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("canonical_entities.id"), nullable=True
-    )
+    canonical_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("canonical_entities.id"), nullable=True)
     text: Mapped[str] = mapped_column(Text)
     entity_type: Mapped[str] = mapped_column(String(64))
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)

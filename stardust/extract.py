@@ -5,7 +5,9 @@ from stardust.registry import nlp as load_nlp
 from stardust.tree.atom import SpanOffset, TokenAttributes
 
 
-async def extract_batch(atom_ids: list[int], texts: list[str], clean_starts: list[int]) -> AsyncGenerator[tuple[int, list[TokenAttributes]], None]:
+async def extract_batch(
+    atom_ids: list[int], texts: list[str], clean_starts: list[int]
+) -> AsyncGenerator[tuple[int, list[TokenAttributes]]]:
     nlp_model = load_nlp()
 
     def _run() -> list[tuple[int, list[TokenAttributes]]]:

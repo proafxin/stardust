@@ -42,6 +42,7 @@ class Node(BaseModel):
     raw_offset: SpanOffset
     clean_offset: SpanOffset
     parent_id: int | None
+    terminal: bool
     nlp_attributes: list[TokenAttributes]
     disambiguation: DisambiguationMetadata | None
 

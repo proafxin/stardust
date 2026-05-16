@@ -9,14 +9,28 @@ from stardust.registry import embedder as load_embedder
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
 _EQUIVALENT_TYPES: dict[str, str] = {
-    "ORG": "ORG", "COMPANY": "ORG", "CORP": "ORG",
-    "GPE": "LOCATION", "LOC": "LOCATION", "LOCATION": "LOCATION",
-    "PERSON": "PERSON", "PER": "PERSON",
-    "NORP": "NORP", "FAC": "FAC", "PRODUCT": "PRODUCT",
-    "EVENT": "EVENT", "WORK_OF_ART": "WORK_OF_ART", "LAW": "LAW",
-    "LANGUAGE": "LANGUAGE", "DATE": "DATE", "TIME": "TIME",
-    "PERCENT": "PERCENT", "MONEY": "MONEY", "QUANTITY": "QUANTITY",
-    "ORDINAL": "ORDINAL", "CARDINAL": "CARDINAL",
+    "ORG": "ORG",
+    "COMPANY": "ORG",
+    "CORP": "ORG",
+    "GPE": "LOCATION",
+    "LOC": "LOCATION",
+    "LOCATION": "LOCATION",
+    "PERSON": "PERSON",
+    "PER": "PERSON",
+    "NORP": "NORP",
+    "FAC": "FAC",
+    "PRODUCT": "PRODUCT",
+    "EVENT": "EVENT",
+    "WORK_OF_ART": "WORK_OF_ART",
+    "LAW": "LAW",
+    "LANGUAGE": "LANGUAGE",
+    "DATE": "DATE",
+    "TIME": "TIME",
+    "PERCENT": "PERCENT",
+    "MONEY": "MONEY",
+    "QUANTITY": "QUANTITY",
+    "ORDINAL": "ORDINAL",
+    "CARDINAL": "CARDINAL",
 }
 
 
@@ -30,12 +44,16 @@ def _entity_spans(attrs: list[TokenAttributes]) -> list[tuple[str, str, SpanOffs
     for attr in attrs:
         if attr.ent_iob_ == "B":
             if current:
-                spans.append((" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset))
+                spans.append(
+                    (" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset)
+                )
             current = [attr]
         elif attr.ent_iob_ == "I":
             current.append(attr)
         elif current:
-            spans.append((" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset))
+            spans.append(
+                (" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset)
+            )
             current = []
     if current:
         spans.append((" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset))
@@ -46,7 +64,9 @@ def _pronoun_spans(attrs: list[TokenAttributes]) -> list[TokenAttributes]:
     return [a for a in attrs if a.pos_ == "PRON"]
 
 
-def _cluster_sync(items: list[tuple[str, SpanOffset, int]], threshold: float) -> list[list[tuple[str, SpanOffset, int]]]:
+def _cluster_sync(
+    items: list[tuple[str, SpanOffset, int]], threshold: float
+) -> list[list[tuple[str, SpanOffset, int]]]:
     if not items:
         return []
     texts = [item[0] for item in items]
@@ -100,20 +120,25 @@ def attach_pronoun_resolutions(
         node = index.nodes[atom_id]
         offset_val = entry.get("offset", [])
         matched = next(
-            (a for a in _pronoun_spans(node.nlp_attributes)
-             if len(offset_val) == 2 and a.offset.start == offset_val[0]),
+            (
+                a
+                for a in _pronoun_spans(node.nlp_attributes)
+                if len(offset_val) == 2 and a.offset.start == offset_val[0]
+            ),
             None,
         )
         if matched is None:
             continue
         if node.disambiguation is None:
             node.disambiguation = DisambiguationMetadata(pronoun_map=[])
-        node.disambiguation.pronoun_map.append(PronounResolution(
-            offset=matched.offset,
-            pronoun=entry.get("pronoun", matched.text),
-            local_entity=entry.get("local_entity", ""),
-            confidence=float(entry.get("confidence", 1.0)),
-        ))
+        node.disambiguation.pronoun_map.append(
+            PronounResolution(
+                offset=matched.offset,
+                pronoun=entry.get("pronoun", matched.text),
+                local_entity=entry.get("local_entity", ""),
+                confidence=float(entry.get("confidence", 1.0)),
+            )
+        )
 
 
 def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes]) -> dict | None:
@@ -125,7 +150,10 @@ def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes])
         "atom_id": atom_id,
         "text": value,
         "entities": [{"text": t, "type": et, "offset": [o.start, o.end]} for t, et, o in entities],
-        "pronouns": [{"text": p.text, "offset": [p.offset.start, p.offset.end], "dep": p.dep_, "morph": p.morph} for p in pronouns],
+        "pronouns": [
+            {"text": p.text, "offset": [p.offset.start, p.offset.end], "dep": p.dep_, "morph": p.morph}
+            for p in pronouns
+        ],
     }
 
 
