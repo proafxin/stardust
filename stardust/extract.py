@@ -27,6 +27,7 @@ async def extract_batch(
                     ),
                 )
                 for token in doc
+                if token.pos_ != "PRON"
             ]
             results.append((atom_id, attrs))
         return results

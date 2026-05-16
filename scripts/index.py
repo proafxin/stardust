@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
-from stardust.llm import async_gemini_complete
+from stardust.llm import async_groq_complete
 from stardust.models import AtomModel
 from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path("data")
-N = 100
+N = 0  # 0 = no limit
 
 DATASETS: list[tuple[str, Path, str]] = [
     ("hotpotqa", DATA_DIR / "hotpotqa" / "corpus.parquet", "hotpotqa"),
@@ -122,7 +122,7 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]]) -> list[dict]:
     if not atom_data:
         return []
     prompt = build_batch_prompt(atom_data)
-    raw = await async_gemini_complete(prompt, max_tokens=max(500, len(atom_data) * 50))
+    raw = await async_groq_complete(prompt, max_tokens=max(500, len(atom_data) * 50))
     try:
         start, end = raw.find("["), raw.rfind("]") + 1
         return json.loads(raw[start:end]) if start != -1 and end > 0 else []
@@ -134,14 +134,16 @@ async def phase_llm() -> None:
     log.info("phase 3: llm pronoun resolution")
 
     async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes))
+        result = await session.execute(select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes, AtomModel.disambiguation))
         rows = result.fetchall()
 
-    # build token-budget batches
+    # build token-budget batches, skipping already-disambiguated atoms
     batches: list[list[tuple[int, str, list]]] = []
     current: list[tuple[int, str, list]] = []
     current_tokens = 0
     for row in rows:
+        if row.disambiguation is not None:
+            continue
         entry = build_pronoun_prompt(row.id, row.value, [TokenAttributes(**a) for a in (row.nlp_attributes or [])])
         tokens = _token_count(json.dumps(entry)) if entry else _token_count(row.value)
         if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT and current:
@@ -154,40 +156,42 @@ async def phase_llm() -> None:
 
     log.info("phase 3: %d batches", len(batches))
 
-    # process batches sequentially to stay within free tier RPM
-    results = []
-    for batch in batches:
-        results.append(await _process_llm_batch(batch))
+    sem = asyncio.Semaphore(1)
 
-    async with SessionLocal() as session:
-        for batch, pronoun_map in zip(batches, results, strict=False):
-            if not pronoun_map:
-                continue
-            atom_lookup = {r[0]: r for r in batch}
-            for entry in pronoun_map:
-                atom_id = entry.get("atom_id")
-                if atom_id not in atom_lookup:
-                    continue
-                _, _, nlp_attrs = atom_lookup[atom_id]
-                attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
-                offset_val = entry.get("offset", [])
-                matched = next(
-                    (a for a in _pronoun_spans(attrs) if len(offset_val) == 2 and a.offset.start == offset_val[0]),
-                    None,
-                )
-                if matched is None:
-                    continue
-                resolution = {
-                    "offset": matched.offset.model_dump(),
-                    "pronoun": entry.get("pronoun", matched.text),
-                    "local_entity": entry.get("local_entity", ""),
-                    "confidence": float(entry.get("confidence", 1.0)),
-                }
-                result = await session.execute(select(AtomModel.disambiguation).where(AtomModel.id == atom_id))
-                existing = result.scalar_one_or_none() or {"pronoun_map": []}
-                existing["pronoun_map"].append(resolution)
-                await session.execute(update(AtomModel).where(AtomModel.id == atom_id).values(disambiguation=existing))
-        await session.commit()
+    async def _run_batch(i: int, batch: list) -> None:
+        async with sem:
+            while True:
+                try:
+                    pronoun_map = await _process_llm_batch(batch)
+                    async with SessionLocal() as session:
+                        for atom_id, value, nlp_attrs in batch:
+                            disambiguation = {"pronoun_map": []}
+                            for entry in pronoun_map:
+                                if entry.get("atom_id") != atom_id:
+                                    continue
+                                attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
+                                offset_val = entry.get("offset", [])
+                                matched = next(
+                                    (a for a in _pronoun_spans(attrs) if len(offset_val) == 2 and a.offset.start == offset_val[0]),
+                                    None,
+                                )
+                                if matched is None:
+                                    continue
+                                disambiguation["pronoun_map"].append({
+                                    "offset": matched.offset.model_dump(),
+                                    "pronoun": entry.get("pronoun", matched.text),
+                                    "local_entity": entry.get("local_entity", ""),
+                                    "confidence": float(entry.get("confidence", 1.0)),
+                                })
+                            await session.execute(update(AtomModel).where(AtomModel.id == atom_id).values(disambiguation=disambiguation))
+                        await session.commit()
+                    log.info("phase 3: batch %d/%d done", i + 1, len(batches))
+                    return
+                except Exception as e:
+                    log.warning("phase 3: batch %d failed (%s), retrying in 10s", i + 1, e)
+                    await asyncio.sleep(10)
+
+    await asyncio.gather(*[_run_batch(i, batch) for i, batch in enumerate(batches)])
 
     log.info("phase 3: done")
 
@@ -268,7 +272,7 @@ async def phase_disambiguation() -> None:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-async def main(skip_normalize: bool = False, skip_nlp: bool = False) -> None:
+async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: bool = False) -> None:
     if not skip_normalize:
         await phase_normalize()
     if not skip_nlp:
@@ -277,7 +281,8 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False) -> None:
         await phase_nlp()
         log.info("unloading nlp model")
         unload_nlp()
-    await phase_llm()
+    if not skip_llm:
+        await phase_llm()
     log.info("loading embedding model")
     load_embedder()
     await phase_disambiguation()
@@ -286,7 +291,8 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False) -> None:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--skip-normalize", action="store_true", help="skip phase 1, assume DB is already populated")
-    parser.add_argument("--skip-nlp", action="store_true", help="skip phase 2, assume nlp_attributes are already populated")
+    parser.add_argument("--skip-normalize", action="store_true")
+    parser.add_argument("--skip-nlp", action="store_true")
+    parser.add_argument("--skip-llm", action="store_true")
     args = parser.parse_args()
-    asyncio.run(main(skip_normalize=args.skip_normalize, skip_nlp=args.skip_nlp))
+    asyncio.run(main(skip_normalize=args.skip_normalize, skip_nlp=args.skip_nlp, skip_llm=args.skip_llm))
