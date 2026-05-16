@@ -270,9 +270,9 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False) -> None:
         await phase_nlp()
         log.info("unloading nlp model")
         unload_nlp()
+    await phase_llm()
     log.info("loading embedding model")
     load_embedder()
-    await phase_llm()
     await phase_disambiguation()
 
 
