@@ -15,15 +15,17 @@ class Settings(BaseSettings):
     def postgres_url(self) -> str:
         return (
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
-            f"@localhost:{self.postgres_port}/{self.postgres_db}"
+            f"@localhost:{self.postgres_port}/{self.postgres_db}?ssl=disable"
         )
 
 
 SPACY_MODEL = "en_core_web_trf"
-EMBEDDING_MODEL = "Harrier-OSS/Harrier-OSS-v1"
+EMBEDDING_MODEL = "microsoft/harrier-oss-v1-0.6b"
 RERANKER_MODEL = "mixedbread-ai/mxbai-rerank-base-v2"
 ATOM_TOKEN_LIMIT = 512
-LLM_BATCH_TOKEN_LIMIT = 100_000
+LLM_BATCH_TOKEN_LIMIT = 80_000
+NLP_BATCH_SIZE = 64
+EMBEDDING_BATCH_SIZE = 128
 RRF_K = 60
 ENTITY_MERGE_THRESHOLD = 0.98
 GLOBAL_MERGE_THRESHOLD = 0.92

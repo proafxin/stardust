@@ -8,15 +8,6 @@ class Modality(StrEnum):
     TABULAR = "tabular"
 
 
-class NodeType(StrEnum):
-    CORPUS = "corpus"
-    DOCUMENT = "document"
-    SECTION = "section"
-    SUBSECTION = "subsection"
-    SUBSUBSECTION = "subsubsection"
-    PARAGRAPH = "paragraph"
-
-
 class SpanOffset(BaseModel):
     start: int
     end: int
@@ -45,7 +36,7 @@ class DisambiguationMetadata(BaseModel):
 
 class Node(BaseModel):
     id: int
-    node_type: NodeType
+    node_type: str
     modality: Modality
     value: str
     raw_offset: SpanOffset
@@ -53,7 +44,6 @@ class Node(BaseModel):
     parent_id: int | None
     nlp_attributes: list[TokenAttributes]
     disambiguation: DisambiguationMetadata | None
-    metadata: dict[str, str | int | float | bool | None]
 
 
 class AtomIndex(BaseModel):

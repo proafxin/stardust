@@ -1,3 +1,5 @@
+import asyncio
+import json
 from collections import defaultdict
 
 import numpy as np
@@ -7,28 +9,14 @@ from stardust.registry import embedder as load_embedder
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
 _EQUIVALENT_TYPES: dict[str, str] = {
-    "ORG": "ORG",
-    "COMPANY": "ORG",
-    "CORP": "ORG",
-    "GPE": "LOCATION",
-    "LOC": "LOCATION",
-    "LOCATION": "LOCATION",
-    "PERSON": "PERSON",
-    "PER": "PERSON",
-    "NORP": "NORP",
-    "FAC": "FAC",
-    "PRODUCT": "PRODUCT",
-    "EVENT": "EVENT",
-    "WORK_OF_ART": "WORK_OF_ART",
-    "LAW": "LAW",
-    "LANGUAGE": "LANGUAGE",
-    "DATE": "DATE",
-    "TIME": "TIME",
-    "PERCENT": "PERCENT",
-    "MONEY": "MONEY",
-    "QUANTITY": "QUANTITY",
-    "ORDINAL": "ORDINAL",
-    "CARDINAL": "CARDINAL",
+    "ORG": "ORG", "COMPANY": "ORG", "CORP": "ORG",
+    "GPE": "LOCATION", "LOC": "LOCATION", "LOCATION": "LOCATION",
+    "PERSON": "PERSON", "PER": "PERSON",
+    "NORP": "NORP", "FAC": "FAC", "PRODUCT": "PRODUCT",
+    "EVENT": "EVENT", "WORK_OF_ART": "WORK_OF_ART", "LAW": "LAW",
+    "LANGUAGE": "LANGUAGE", "DATE": "DATE", "TIME": "TIME",
+    "PERCENT": "PERCENT", "MONEY": "MONEY", "QUANTITY": "QUANTITY",
+    "ORDINAL": "ORDINAL", "CARDINAL": "CARDINAL",
 }
 
 
@@ -38,22 +26,19 @@ def canonicalize_type(ent_type: str) -> str:
 
 def _entity_spans(attrs: list[TokenAttributes]) -> list[tuple[str, str, SpanOffset]]:
     spans: list[tuple[str, str, SpanOffset]] = []
-    current_tokens: list[TokenAttributes] = []
+    current: list[TokenAttributes] = []
     for attr in attrs:
         if attr.ent_iob_ == "B":
-            if current_tokens:
-                text = " ".join(t.text for t in current_tokens)
-                spans.append((text, canonicalize_type(current_tokens[0].ent_type_), current_tokens[0].offset))
-            current_tokens = [attr]
+            if current:
+                spans.append((" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset))
+            current = [attr]
         elif attr.ent_iob_ == "I":
-            current_tokens.append(attr)
-        elif current_tokens:
-            text = " ".join(t.text for t in current_tokens)
-            spans.append((text, canonicalize_type(current_tokens[0].ent_type_), current_tokens[0].offset))
-            current_tokens = []
-    if current_tokens:
-        text = " ".join(t.text for t in current_tokens)
-        spans.append((text, canonicalize_type(current_tokens[0].ent_type_), current_tokens[0].offset))
+            current.append(attr)
+        elif current:
+            spans.append((" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset))
+            current = []
+    if current:
+        spans.append((" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset))
     return spans
 
 
@@ -61,15 +46,13 @@ def _pronoun_spans(attrs: list[TokenAttributes]) -> list[TokenAttributes]:
     return [a for a in attrs if a.pos_ == "PRON"]
 
 
-def _cluster_by_embedding(
-    items: list[tuple[str, SpanOffset, int]],
-    threshold: float,
-) -> list[list[tuple[str, SpanOffset, int]]]:
+def _cluster_sync(items: list[tuple[str, SpanOffset, int]], threshold: float) -> list[list[tuple[str, SpanOffset, int]]]:
     if not items:
         return []
+    texts = [item[0] for item in items]
     vecs = load_embedder().encode(texts, normalize_embeddings=True)
-    clusters: list[list[int]] = []
     assigned = [False] * len(items)
+    clusters: list[list[int]] = []
     for i in range(len(items)):
         if assigned[i]:
             continue
@@ -83,11 +66,17 @@ def _cluster_by_embedding(
     return [[items[idx] for idx in cluster] for cluster in clusters]
 
 
-def resolve_local(
-    index: AtomIndex, pronoun_map: list[dict] | None = None
+async def cluster_by_embedding(
+    items: list[tuple[str, SpanOffset, int]],
+    threshold: float,
+) -> list[list[tuple[str, SpanOffset, int]]]:
+    return await asyncio.to_thread(_cluster_sync, items, threshold)
+
+
+async def resolve_local(
+    index: AtomIndex,
 ) -> dict[str, list[list[tuple[str, SpanOffset, int]]]]:
     by_type: dict[str, list[tuple[str, SpanOffset, int]]] = defaultdict(list)
-
     for atom_id in index.atoms:
         node = index.nodes[atom_id]
         for text, ent_type, offset in _entity_spans(node.nlp_attributes):
@@ -95,45 +84,59 @@ def resolve_local(
 
     clusters: dict[str, list[list[tuple[str, SpanOffset, int]]]] = {}
     for ent_type, mentions in by_type.items():
-        clusters[ent_type] = _cluster_by_embedding(mentions, ENTITY_MERGE_THRESHOLD)
-
-    if pronoun_map:
-        for entry in pronoun_map:
-            atom_id = entry["atom_id"]
-            node = index.nodes[atom_id]
-            pronoun_attrs = _pronoun_spans(node.nlp_attributes)
-            matched = next(
-                (a for a in pronoun_attrs if a.offset.start == entry["offset"][0]),
-                None,
-            )
-            if matched is None:
-                continue
-            resolution = PronounResolution(
-                offset=matched.offset,
-                pronoun=entry["pronoun"],
-                local_entity=entry["local_entity"],
-                confidence=entry.get("confidence", 1.0),
-            )
-            if node.disambiguation is None:
-                node.disambiguation = DisambiguationMetadata(pronoun_map=[])
-            node.disambiguation.pronoun_map.append(resolution)
+        clusters[ent_type] = await cluster_by_embedding(mentions, ENTITY_MERGE_THRESHOLD)
 
     return clusters
 
 
-def build_pronoun_prompt(index: AtomIndex) -> str:
-    lines: list[str] = [
-        (
-            "You are a coreference resolver. For each pronoun in the atoms below, "
-            "identify which named entity it refers to within this batch. "
-            "Return a JSON array of objects with fields: "
-            "atom_id (int), offset ([start, end]), pronoun (str), local_entity (str), confidence (float 0-1).\n"
-        )
-    ]
-    for atom_id in index.atoms:
-        node = index.nodes[atom_id]
-        pronouns = _pronoun_spans(node.nlp_attributes)
-        if not pronouns:
+def attach_pronoun_resolutions(
+    index: AtomIndex,
+    pronoun_map: list[dict],
+) -> None:
+    for entry in pronoun_map:
+        atom_id = entry.get("atom_id")
+        if atom_id not in index.nodes:
             continue
-        lines.append(f"atom_id={atom_id}: {node.value}")
-    return "\n".join(lines)
+        node = index.nodes[atom_id]
+        offset_val = entry.get("offset", [])
+        matched = next(
+            (a for a in _pronoun_spans(node.nlp_attributes)
+             if len(offset_val) == 2 and a.offset.start == offset_val[0]),
+            None,
+        )
+        if matched is None:
+            continue
+        if node.disambiguation is None:
+            node.disambiguation = DisambiguationMetadata(pronoun_map=[])
+        node.disambiguation.pronoun_map.append(PronounResolution(
+            offset=matched.offset,
+            pronoun=entry.get("pronoun", matched.text),
+            local_entity=entry.get("local_entity", ""),
+            confidence=float(entry.get("confidence", 1.0)),
+        ))
+
+
+def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes]) -> dict | None:
+    pronouns = _pronoun_spans(attrs)
+    if not pronouns:
+        return None
+    entities = _entity_spans(attrs)
+    return {
+        "atom_id": atom_id,
+        "text": value,
+        "entities": [{"text": t, "type": et, "offset": [o.start, o.end]} for t, et, o in entities],
+        "pronouns": [{"text": p.text, "offset": [p.offset.start, p.offset.end], "dep": p.dep_, "morph": p.morph} for p in pronouns],
+    }
+
+
+def build_batch_prompt(atom_data: list[dict]) -> str:
+    if not atom_data:
+        return ""
+    return (
+        "You are a coreference resolver. For each pronoun below, identify which named entity "
+        "within this batch it refers to. Use the entity list, dependency relation (dep), and "
+        "morphological features (morph) as signals.\n"
+        "Return a JSON array only, no other text. Each object must have:\n"
+        "  atom_id (int), offset ([start, end]), pronoun (str), local_entity (str), confidence (float 0-1)\n\n"
+        f"Atoms:\n{json.dumps(atom_data, indent=2)}"
+    )

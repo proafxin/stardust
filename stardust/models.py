@@ -21,7 +21,6 @@ class TreeNodeModel(Base):
     value: Mapped[str] = mapped_column(Text)
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
-    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default={})
     nlp_attributes: Mapped[list] = mapped_column(JSONB, default=[])
     disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
@@ -40,7 +39,6 @@ class AtomModel(Base):
     value: Mapped[str] = mapped_column(Text)
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
-    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default={})
     nlp_attributes: Mapped[list] = mapped_column(JSONB, default=[])
     disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
