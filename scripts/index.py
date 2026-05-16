@@ -3,7 +3,7 @@ import logging
 
 from datasets import load_dataset
 
-from stardust.db import get_session, init_db
+from stardust.db import get_session
 from stardust.orchestrator import index_documents
 from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
@@ -61,8 +61,6 @@ async def index_crag() -> None:
 
 
 async def main() -> None:
-    log.info("initializing db...")
-    await init_db()
     if DATASET == "hotpotqa":
         await index_hotpotqa()
     elif DATASET == "qasper":

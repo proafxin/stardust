@@ -97,7 +97,7 @@ def normalize_crag(qapair: dict[str, Any], groundingdata: dict[str, Any] | None 
 
 def _parse_markdown_doc(
     groundingdata: dict[str, Any],
-    base_meta: dict[str, str | int | float | bool | None],
+    base_meta: dict[str, str | int | float | bool | None]
 ) -> Document:
     markdown: str = groundingdata.get("markdown", "")
     filename: str = groundingdata.get("filename", "")
