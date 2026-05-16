@@ -1,8 +1,9 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 
-from datasets import load_dataset
+import pyarrow.parquet as pq
 from sqlalchemy import select, update
 
 from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE
@@ -25,9 +26,14 @@ from stardust.tree.atom import AtomIndex, DisambiguationMetadata, Node, SpanOffs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-DATASET = "hotpotqa"
-SPLIT = "train"
+DATA_DIR = Path("data")
 N = 100
+
+DATASETS: list[tuple[str, Path, str]] = [
+    ("hotpotqa", DATA_DIR / "hotpotqa" / "corpus.parquet", "hotpotqa"),
+    ("qasper", DATA_DIR / "qasper" / "train.parquet", "qasper"),
+    ("crag_open", DATA_DIR / "crag" / "open" / "train.parquet", "crag_open"),
+]
 
 
 def _token_count(text: str) -> int:
@@ -39,31 +45,33 @@ def _token_count(text: str) -> int:
 
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
-    if DATASET == "hotpotqa":
-        ds = load_dataset("hotpot_qa", "fullwiki", split=SPLIT)  # nosec B615
-        normalizer, id_prefix = normalize_hotpotqa, "hotpotqa"
-    elif DATASET == "qasper":
-        ds = load_dataset("hulki/allenai_qasper", split=SPLIT)  # nosec B615
-        normalizer, id_prefix = normalize_qasper, "qasper"
-    else:
-        ds = load_dataset("DataRobot-Research/crag", "qapairs_open", split=SPLIT)  # nosec B615
-        normalizer, id_prefix = normalize_crag, "crag_open"
-
-    if N:
-        ds = ds.select(range(N))
-
-    for i, record in enumerate(ds):
-        doc_id = f"{id_prefix}_{i}"
-        nodes: list[Node] = []
-        atoms: list[int] = []
-        async for parsed in normalizer(record):
-            nodes.append(parsed.node)
-            if parsed.is_atom:
-                atoms.append(parsed.node.id)
-        async with SessionLocal() as session:
-            await insert_index(nodes, atoms, doc_id, session)
-        if i % 10 == 0:
-            log.info("phase 1: %d/%d records", i + 1, len(ds))
+    normalizer_map = {
+        "hotpotqa": normalize_hotpotqa,
+        "qasper": normalize_qasper,
+        "crag_open": normalize_crag,
+    }
+    global_counter = 0
+    for dataset_name, parquet_path, id_prefix in DATASETS:
+        table = pq.read_table(parquet_path)
+        records = table.to_pylist()
+        if N:
+            records = records[:N]
+        normalizer = normalizer_map[dataset_name]
+        total = len(records)
+        for i, record in enumerate(records):
+            doc_id = f"{id_prefix}_{i}"
+            nodes: list[Node] = []
+            atoms: list[int] = []
+            async for parsed in normalizer(record, global_counter):
+                nodes.append(parsed.node)
+                if parsed.is_atom:
+                    atoms.append(parsed.node.id)
+            if nodes:
+                global_counter = max(n.id for n in nodes) + 1
+            async with SessionLocal() as session:
+                await insert_index(nodes, atoms, doc_id, session)
+            if i % 10 == 0:
+                log.info("phase 1 [%s]: %d/%d records", dataset_name, i + 1, total)
 
 
 # ── Phase 2: NLP extraction ──────────────────────────────────────────────────
