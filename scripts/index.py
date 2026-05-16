@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
-from stardust.llm import async_groq_complete
+from stardust.llm import async_gemini_complete
 from stardust.models import AtomModel
 from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
@@ -118,7 +118,7 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]]) -> list[dict]:
     if not atom_data:
         return []
     prompt = build_batch_prompt(atom_data)
-    raw = await async_groq_complete(prompt)
+    raw = await async_gemini_complete(prompt)
     try:
         start, end = raw.find("["), raw.rfind("]") + 1
         return json.loads(raw[start:end]) if start != -1 and end > 0 else []
@@ -261,14 +261,15 @@ async def phase_disambiguation() -> None:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-async def main(skip_normalize: bool = False) -> None:
+async def main(skip_normalize: bool = False, skip_nlp: bool = False) -> None:
     if not skip_normalize:
         await phase_normalize()
-    log.info("loading nlp model")
-    load_nlp()
-    await phase_nlp()
-    log.info("unloading nlp model")
-    unload_nlp()
+    if not skip_nlp:
+        log.info("loading nlp model")
+        load_nlp()
+        await phase_nlp()
+        log.info("unloading nlp model")
+        unload_nlp()
     log.info("loading embedding model")
     load_embedder()
     await phase_llm()
@@ -279,5 +280,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-normalize", action="store_true", help="skip phase 1, assume DB is already populated")
+    parser.add_argument("--skip-nlp", action="store_true", help="skip phase 2, assume nlp_attributes are already populated")
     args = parser.parse_args()
-    asyncio.run(main(skip_normalize=args.skip_normalize))
+    asyncio.run(main(skip_normalize=args.skip_normalize, skip_nlp=args.skip_nlp))

@@ -12,7 +12,7 @@ async def extract_batch(
 
     def _run() -> list[tuple[int, list[TokenAttributes]]]:
         results = []
-        for atom_id, doc, clean_start in zip(atom_ids, nlp_model.pipe(texts), clean_starts, strict=False):
+        for atom_id, doc, clean_start in zip(atom_ids, nlp_model.pipe(texts, batch_size=256), clean_starts, strict=False):
             attrs = [
                 TokenAttributes(
                     text=token.text,
