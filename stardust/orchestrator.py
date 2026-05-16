@@ -6,7 +6,7 @@ from stardust.llm import async_groq_complete
 from stardust.parse import Document, build_atom_index
 from stardust.resolution.global_resolution import CanonicalEntity, merge_across_documents
 from stardust.resolution.local import build_pronoun_prompt, resolve_local
-from stardust.retrieval.search import embed_atoms
+from stardust.query import embed_atoms
 from stardust.tree.atom import AtomIndex
 
 log = logging.getLogger(__name__)

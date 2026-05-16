@@ -10,6 +10,14 @@ from stardust.resolution.global_resolution import CanonicalEntity
 from stardust.tree.atom import AtomIndex
 
 
+def embed_atoms(index: AtomIndex) -> None:
+    atom_ids = index.atoms
+    texts = [index.nodes[a].value for a in atom_ids]
+    vecs = load_embedder().encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    for atom_id, vec in zip(atom_ids, vecs, strict=False):
+        index.embeddings[atom_id] = vec.tolist()
+
+
 @dataclass
 class RankedAtom:
     id: int

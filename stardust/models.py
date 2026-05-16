@@ -25,8 +25,8 @@ class TreeNodeModel(Base):
     nlp_attributes: Mapped[list] = mapped_column(JSONB, default=[])
     disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    children: Mapped[list[TreeNodeModel]] = relationship("TreeNodeModel", back_populates="parent")
-    parent: Mapped[TreeNodeModel | None] = relationship(
+    children: Mapped[list["TreeNodeModel"]] = relationship("TreeNodeModel", back_populates="parent")
+    parent: Mapped["TreeNodeModel | None"] = relationship(
         "TreeNodeModel", back_populates="children", remote_side=[id]
     )
 
@@ -59,7 +59,7 @@ class CanonicalEntityModel(Base):
     entity_type: Mapped[str] = mapped_column(String(64))
     aliases: Mapped[list] = mapped_column(JSONB, default=[])
 
-    mentions: Mapped[list[EntityMentionModel]] = relationship(
+    mentions: Mapped[list["EntityMentionModel"]] = relationship(
         "EntityMentionModel", back_populates="canonical_entity"
     )
 
@@ -79,6 +79,6 @@ class EntityMentionModel(Base):
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
 
-    canonical_entity: Mapped[CanonicalEntityModel | None] = relationship(
+    canonical_entity: Mapped["CanonicalEntityModel | None"] = relationship(
         "CanonicalEntityModel", back_populates="mentions"
     )
