@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import pyarrow.parquet as pq
 import tiktoken
@@ -49,6 +50,30 @@ def _token_count(text: str) -> int:
 # ── Phase 1: Normalize and persist ──────────────────────────────────────────
 
 
+NORMALIZE_BATCH_SIZE = 10_000
+
+
+async def _normalize_batch(records: list, start_id: int, normalizer: Any, id_prefix: str, batch_offset: int) -> tuple[list[Node], list[int], list[str], int]:
+    all_nodes: list[Node] = []
+    all_atoms: list[int] = []
+    all_doc_ids: list[str] = []
+    counter = start_id
+    for i, record in enumerate(records):
+        doc_id = f"{id_prefix}_{batch_offset + i}"
+        nodes: list[Node] = []
+        atoms: list[int] = []
+        async for parsed in normalizer(record, counter):
+            nodes.append(parsed.node)
+            if parsed.is_atom:
+                atoms.append(parsed.node.id)
+        if nodes:
+            counter = max(n.id for n in nodes) + 1
+        all_nodes.extend(nodes)
+        all_atoms.extend(atoms)
+        all_doc_ids.append(doc_id)
+    return all_nodes, all_atoms, all_doc_ids, counter
+
+
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
     normalizer_map = {
@@ -64,20 +89,13 @@ async def phase_normalize() -> None:
             records = records[:N]
         normalizer = normalizer_map[dataset_name]
         total = len(records)
-        for i, record in enumerate(records):
-            doc_id = f"{id_prefix}_{i}"
-            nodes: list[Node] = []
-            atoms: list[int] = []
-            async for parsed in normalizer(record, global_counter):
-                nodes.append(parsed.node)
-                if parsed.is_atom:
-                    atoms.append(parsed.node.id)
-            if nodes:
-                global_counter = max(n.id for n in nodes) + 1
+        for batch_start in range(0, total, NORMALIZE_BATCH_SIZE):
+            batch = records[batch_start:batch_start + NORMALIZE_BATCH_SIZE]
+            nodes, atoms, doc_ids, global_counter = await _normalize_batch(batch, global_counter, normalizer, id_prefix, batch_start)
             async with SessionLocal() as session:
-                await insert_index(nodes, atoms, doc_id, session)
-            if i % 10 == 0:
-                log.info("phase 1 [%s]: %d/%d records", dataset_name, i + 1, total)
+                for doc_id, doc_nodes, doc_atoms in zip(doc_ids, _split_by_doc(nodes, doc_ids), _split_atoms_by_doc(atoms, nodes, doc_ids)):
+                    await insert_index(doc_nodes, doc_atoms, doc_id, session)
+            log.info("phase 1 [%s]: %d/%d records", dataset_name, min(batch_start + NORMALIZE_BATCH_SIZE, total), total)
 
 
 # ── Phase 2: NLP extraction ──────────────────────────────────────────────────
