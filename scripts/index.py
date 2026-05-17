@@ -142,13 +142,16 @@ async def _batch_worker(redis: Redis) -> None:
     await redis.incr(BATCH_DONE_KEY)
 
 
-async def _insert_worker(redis: Redis) -> None:
+async def _insert_worker(redis: Redis, worker_id: int) -> None:
     inserted = 0
+    consumer = f"worker-{worker_id}"
     while True:
-        entries = await redis.xreadgroup(INSERT_GROUP, "worker", {INSERT_STREAM: ">"}, count=1, block=500)
+        entries = await redis.xreadgroup(INSERT_GROUP, consumer, {INSERT_STREAM: ">"}, count=1, block=500)
         if not entries:
             if int(await redis.get(BATCH_DONE_KEY) or 0) >= BATCH_WORKERS:
-                break
+                pending = await redis.xpending(INSERT_STREAM, INSERT_GROUP)
+                if pending["pending"] == 0:
+                    break
             continue
         for _, messages in entries:
             for msg_id, data in messages:
@@ -165,7 +168,7 @@ async def _insert_worker(redis: Redis) -> None:
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
     redis = Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=False)
-    await redis.delete(READ_STREAM, NORMALIZE_STREAM, INSERT_STREAM, READ_DONE_KEY, READ_DONE_KEY + ":all", NORMALIZE_DONE_KEY, BATCH_DONE_KEY)
+    await redis.delete(NODE_ID_KEY, READ_STREAM, NORMALIZE_STREAM, INSERT_STREAM, READ_DONE_KEY, READ_DONE_KEY + ":all", NORMALIZE_DONE_KEY, BATCH_DONE_KEY)
     try:
         await redis.xgroup_create(INSERT_STREAM, INSERT_GROUP, id="0", mkstream=True)
     except Exception:
@@ -177,7 +180,7 @@ async def phase_normalize() -> None:
 
     normalize_tasks = [asyncio.create_task(_normalize_worker(redis)) for _ in range(NORMALIZE_WORKERS)]
     batch_tasks = [asyncio.create_task(_batch_worker(redis)) for _ in range(BATCH_WORKERS)]
-    insert_tasks = [asyncio.create_task(_insert_worker(redis)) for _ in range(INSERT_WORKERS)]
+    insert_tasks = [asyncio.create_task(_insert_worker(redis, i)) for i in range(INSERT_WORKERS)]
 
     await asyncio.gather(*normalize_tasks, *batch_tasks, *insert_tasks)
     await redis.aclose()
