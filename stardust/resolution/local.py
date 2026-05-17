@@ -1,5 +1,4 @@
 import json
-from collections import defaultdict
 
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
@@ -26,9 +25,7 @@ def _pronoun_spans(attrs: list[TokenAttributes]) -> list[TokenAttributes]:
     return [a for a in attrs if a.pos_ == "PRON"]
 
 
-def collect_entity_mentions(
-    record_id: str, index: AtomIndex
-) -> list[tuple[str, str, SpanOffset, int, str]]:
+def collect_entity_mentions(record_id: str, index: AtomIndex) -> list[tuple[str, str, SpanOffset, int, str]]:
     """Return (surface, ent_type, offset, atom_id, atom_value) for all entity mentions in a record."""
     mentions = []
     for atom_id in index.atoms:
@@ -37,10 +34,9 @@ def collect_entity_mentions(
             if ent_type:
                 mentions.append((surface, ent_type, offset, atom_id, node.value))
     return mentions
-def attach_pronoun_resolutions(
-    index: AtomIndex,
-    pronoun_map: list[dict],
-) -> None:
+
+
+def attach_pronoun_resolutions(index: AtomIndex, pronoun_map: list[dict]) -> None:
     for entry in pronoun_map:
         atom_id = entry.get("atom_id")
         if atom_id not in index.nodes:

@@ -197,21 +197,23 @@ async def phase_nlp() -> None:
     log.info("phase 2: nlp extraction")
 
     done = 0
-    async with SessionLocal() as session:
-        stream = await session.stream(select(AtomModel.id, AtomModel.value, AtomModel.clean_offset))
-        async for partition in stream.partitions(NLP_BATCH_SIZE):
-            atom_ids = [r.id for r in partition]
-            texts = [r.value for r in partition]
-            clean_starts = [r.clean_offset["start"] for r in partition]
-            async for atom_id, attrs in extract_batch(atom_ids, texts, clean_starts):
-                await session.execute(
-                    update(AtomModel)
-                    .where(AtomModel.id == atom_id)
-                    .values(nlp_attributes=[a.model_dump() for a in attrs])
-                )
-            await session.commit()
-            done += len(partition)
-            log.info("phase 2: %d atoms done", done)
+    async with SessionLocal() as read_session:
+        async with read_session.begin():
+            stream = await read_session.stream(select(AtomModel.id, AtomModel.value, AtomModel.clean_offset))
+            async for partition in stream.partitions(NLP_BATCH_SIZE):
+                atom_ids = [r.id for r in partition]
+                texts = [r.value for r in partition]
+                clean_starts = [r.clean_offset["start"] for r in partition]
+                async with SessionLocal() as write_session:
+                    async for atom_id, attrs in extract_batch(atom_ids, texts, clean_starts):
+                        await write_session.execute(
+                            update(AtomModel)
+                            .where(AtomModel.id == atom_id)
+                            .values(nlp_attributes=[a.model_dump() for a in attrs])
+                        )
+                    await write_session.commit()
+                done += len(partition)
+                log.info("phase 2: %d atoms done", done)
 
 
 # ── Phase 3: LLM pronoun resolution (Ollama / Qwen3 4B) ─────────────────────
