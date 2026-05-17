@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 from redis.asyncio import Redis
 from sqlalchemy import select, text, update
 
-from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, NLP_COMMIT_BATCH_SIZE, settings
+from stardust.config import EMBEDDING_BATCH_SIZE, EMBEDDING_INTERNAL_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, NLP_COMMIT_BATCH_SIZE, settings
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
@@ -377,7 +377,7 @@ async def phase_disambiguation() -> None:
             batch_texts,
             normalize_embeddings=True,
             show_progress_bar=False,
-            batch_size=32,
+            batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
         )
         async with SessionLocal() as session:
             for atom_id, vec, text_val in zip(batch_ids, vecs, batch_texts, strict=False):
