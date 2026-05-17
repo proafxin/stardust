@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 from sqlalchemy import text
@@ -9,9 +8,7 @@ from sqlalchemy import text
 from stardust.db import SessionLocal
 from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_index
-
-if TYPE_CHECKING:
-    from stardust.tree.atom import Node
+from stardust.tree.atom import Node
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)

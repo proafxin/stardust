@@ -35,14 +35,13 @@ class DisambiguationMetadata(BaseModel):
 
 
 class Node(BaseModel):
-    id: int | None = None
-    local_id: int  # temp ID for parent-child linking during normalization
+    id: int
     node_type: str
     modality: Modality
     value: str
     raw_offset: SpanOffset
     clean_offset: SpanOffset
-    parent_local_id: int | None
+    parent_id: int | None
     terminal: bool
     nlp_attributes: list[TokenAttributes]
     disambiguation: DisambiguationMetadata | None

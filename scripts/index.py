@@ -252,6 +252,7 @@ async def _process_doc_disambiguation(doc_id: str) -> tuple[str, dict]:
             raw_offset=SpanOffset(**row.raw_offset),
             clean_offset=SpanOffset(**row.clean_offset),
             parent_id=row.parent_id,
+            terminal=True,
             nlp_attributes=attrs,
             disambiguation=disambig,
         )
