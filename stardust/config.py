@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     postgres_password: str
     groq_api_key: str
     gemini_api_key: str
+    redis_port: int = 6379
+    redis_host: str = "localhost"
 
     @property
     def postgres_url(self) -> str:

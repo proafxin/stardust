@@ -1,4 +1,14 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
   stardust_db:
     image: paradedb/paradedb:latest
     ports:

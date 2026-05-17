@@ -20,6 +20,7 @@ dependencies = [
     "pillow>=12.2.0",
     "pydantic-settings>=2.14.1",
     "pylatexenc>=2.10",
+    "redis>=7.4.0",
     "sentence-transformers>=5.5.0",
     "spacy>=3.8.14",
     "spacy-transformers>=1.4.0",

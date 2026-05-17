@@ -6,9 +6,10 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import tiktoken
+from redis.asyncio import Redis
 from sqlalchemy import select, text, update
 
-from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE
+from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, settings
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import async_groq_complete
@@ -57,34 +58,51 @@ NORMALIZE_WORKERS = 4
 INSERT_WORKERS = 2
 
 
+NODE_ID_KEY = "stardust:node_id_counter"
+
+
+async def _next_ids(redis: Redis, count: int) -> int:
+    """Atomically reserve `count` IDs, returns the first ID in the range."""
+    end = await redis.incrby(NODE_ID_KEY, count)
+    return int(end) - count
+
+
 async def _normalize_worker(
     records: list,
     id_prefix: str,
-    start_id: int,
     batch_offset: int,
     normalizer: Any,
     queue: asyncio.Queue,
-) -> int:
-    """Returns the next available id after processing all records."""
-    counter = start_id
+    redis: Redis,
+) -> None:
     docs: list[tuple[str, list[Node], list[int]]] = []
     for i, record in enumerate(records):
         doc_id = f"{id_prefix}_{batch_offset + i}"
+        # count nodes first to reserve a contiguous ID block atomically
+        raw_nodes: list[Any] = []
+        async for parsed in normalizer(record, 0):
+            raw_nodes.append(parsed)
+        if not raw_nodes:
+            continue
+        start_id = await _next_ids(redis, len(raw_nodes))
+        # remap local 0-based IDs to globally unique IDs
+        id_map: dict[int, int] = {j: start_id + j for j in range(len(raw_nodes))}
         nodes: list[Node] = []
         atoms: list[int] = []
-        async for parsed in normalizer(record, counter):
-            nodes.append(parsed.node)
+        for j, parsed in enumerate(raw_nodes):
+            node = parsed.node.model_copy(update={
+                "id": id_map[j],
+                "parent_id": id_map[parsed.node.parent_id] if parsed.node.parent_id is not None else None,
+            })
+            nodes.append(node)
             if parsed.is_atom:
-                atoms.append(parsed.node.id)
-        if nodes:
-            counter = max(n.id for n in nodes) + 1
+                atoms.append(node.id)
         docs.append((doc_id, nodes, atoms))
         if len(docs) >= NORMALIZE_BATCH_SIZE:
             await queue.put(docs)
             docs = []
     if docs:
         await queue.put(docs)
-    return counter
 
 
 async def _insert_worker(queue: asyncio.Queue, sentinel: object) -> None:
@@ -110,13 +128,13 @@ async def phase_normalize() -> None:
         "crag_open": normalize_crag,
     }
     sentinel = object()
-    # maxsize provides backpressure: normalizers block if inserters fall behind
     queue: asyncio.Queue = asyncio.Queue(maxsize=INSERT_WORKERS * 2)
     inserters = [
         asyncio.create_task(_insert_worker(queue, sentinel))
         for _ in range(INSERT_WORKERS)
     ]
-    global_counter = 0
+    redis = Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=False)
+    await redis.delete(NODE_ID_KEY)
     for dataset_name, parquet_path, id_prefix in DATASETS:
         records = pq.read_table(parquet_path).to_pylist()
         if N:
@@ -124,20 +142,18 @@ async def phase_normalize() -> None:
         normalizer = normalizer_map[dataset_name]
         total = len(records)
         chunk = max(1, total // NORMALIZE_WORKERS)
-        # pre-assign non-overlapping ID ranges per worker: stride = chunk * max_nodes_per_record
-        id_stride = chunk * 20
         normalizers = [
             asyncio.create_task(_normalize_worker(
-                records[i : i + chunk], id_prefix, global_counter + (i // chunk) * id_stride, i, normalizer, queue
+                records[i : i + chunk], id_prefix, i, normalizer, queue, redis
             ))
             for i in range(0, total, chunk)
         ]
         await asyncio.gather(*normalizers)
-        global_counter += len(normalizers) * id_stride
         log.info("phase 1 [%s]: %d records normalized", dataset_name, total)
     for _ in range(INSERT_WORKERS):
         await queue.put(sentinel)
     await asyncio.gather(*inserters)
+    await redis.aclose()
     log.info("phase 1: done")
 
 
