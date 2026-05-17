@@ -26,7 +26,7 @@ def _dynamic_batches(texts: list[str]) -> list[list[str]]:
     batches: list[list[str]] = []
     current: list[str] = []
     current_bytes = 0
-    budget = int(free_bytes * 0.9)
+    budget = int(free_bytes * 0.5)
     for text in texts:
         tokens = min(len(text.split()), 512)
         cost = tokens * bytes_per_token
@@ -46,8 +46,9 @@ def _batched_encode(embedder, texts: list[str]) -> np.ndarray:
     vecs = []
     for batch in _dynamic_batches(texts):
         with torch.no_grad():
-            vecs.append(embedder.encode(batch, normalize_embeddings=True))
+            vecs.append(np.array(embedder.encode(batch, normalize_embeddings=True)))
         torch.cuda.empty_cache()
+        log.info("after batch encode: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
     return np.vstack(vecs) if len(vecs) > 1 else vecs[0]
 
 
