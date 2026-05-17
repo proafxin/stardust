@@ -5,14 +5,12 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow.parquet as pq
-import tiktoken
 from redis.asyncio import Redis
 from sqlalchemy import select, text, update
 
-from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, settings
+from stardust.config import EMBEDDING_BATCH_SIZE, NLP_BATCH_SIZE, settings
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
-from stardust.llm import async_groq_complete
 from stardust.models import AtomModel
 from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
@@ -20,12 +18,7 @@ from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_nlp
 from stardust.resolution.global_resolution import merge_across_documents
-from stardust.resolution.local import (
-    _pronoun_spans,
-    build_batch_prompt,
-    build_pronoun_prompt,
-    resolve_local,
-)
+from stardust.resolution.local import resolve_local
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, Node, SpanOffset, TokenAttributes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -39,13 +32,6 @@ DATASETS: list[tuple[str, Path, str]] = [
     # ("qasper", DATA_DIR / "qasper" / "train.parquet", "qasper"),  # TODO: fix chunking
     ("crag_open", DATA_DIR / "crag" / "open" / "train.parquet", "crag_open"),
 ]
-
-
-_enc = tiktoken.get_encoding("cl100k_base")
-
-
-def _token_count(text: str) -> int:
-    return len(_enc.encode(text))
 
 
 # ── Phase 1: Normalize and persist ──────────────────────────────────────────
@@ -398,7 +384,7 @@ async def phase_disambiguation() -> None:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: bool = False) -> None:
+async def main(skip_normalize: bool = False, skip_nlp: bool = False) -> None:
     if not skip_normalize:
         await phase_normalize()
     if not skip_nlp:
@@ -407,8 +393,6 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
         await phase_nlp()
         log.info("unloading nlp model")
         unload_nlp()
-    if not skip_llm:
-        await phase_llm()
     log.info("loading embedding model")
     load_embedder()
     await phase_disambiguation()
@@ -420,6 +404,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-normalize", action="store_true")
     parser.add_argument("--skip-nlp", action="store_true")
-    parser.add_argument("--skip-llm", action="store_true")
     args = parser.parse_args()
-    asyncio.run(main(skip_normalize=args.skip_normalize, skip_nlp=args.skip_nlp, skip_llm=args.skip_llm))
+    asyncio.run(main(skip_normalize=args.skip_normalize, skip_nlp=args.skip_nlp))
