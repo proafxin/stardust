@@ -70,7 +70,7 @@ def _cluster_sync(
     if not items:
         return []
     texts = [item[0] for item in items]
-    vecs = load_embedder().encode(texts, normalize_embeddings=True)
+    vecs = load_embedder().encode(texts, normalize_embeddings=True, show_progress_bar=False)
     assigned = [False] * len(items)
     clusters: list[list[int]] = []
     for i in range(len(items)):

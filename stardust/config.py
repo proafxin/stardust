@@ -8,8 +8,6 @@ class Settings(BaseSettings):
     postgres_db: str
     postgres_user: str
     postgres_password: str
-    groq_api_key: str
-    gemini_api_key: str
     redis_port: int = 6379
     redis_host: str = "localhost"
     ollama_host: str = "localhost"
