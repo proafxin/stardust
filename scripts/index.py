@@ -51,6 +51,8 @@ INSERT_BATCH_SIZE = 50_000
 READ_STREAM = "stardust:stream:read"
 NORMALIZE_STREAM = "stardust:stream:normalize"
 INSERT_STREAM = "stardust:stream:insert"
+READ_GROUP = "stardust:read:group"
+NORMALIZE_GROUP = "stardust:normalize:group"
 INSERT_GROUP = "stardust:insert:group"
 NODE_ID_KEY = "stardust:node_id_counter"
 READ_DONE_KEY = "stardust:read_done"
@@ -84,21 +86,21 @@ async def _reader_worker(parquet_path: Path, id_prefix: str, redis: Redis, n_rea
         await redis.set(READ_DONE_KEY + ":all", 1)
 
 
-async def _normalize_worker(redis: Redis) -> None:
-    last_id = "0"
+async def _normalize_worker(redis: Redis, worker_id: int) -> None:
+    consumer = f"normalize-{worker_id}"
     while True:
-        entries = await redis.xread({READ_STREAM: last_id}, count=10, block=500)
+        entries = await redis.xreadgroup(READ_GROUP, consumer, {READ_STREAM: ">"}, count=10, block=500)
         if not entries:
             if await redis.exists(READ_DONE_KEY + ":all"):
                 break
             continue
         for _, messages in entries:
             for msg_id, data in messages:
-                last_id = msg_id
                 payload = json.loads(data[b"record"])
                 record, id_prefix, i = payload["data"], payload["id_prefix"], payload["i"]
                 doc_id = f"{id_prefix}_{i}"
                 raw_nodes: list[Any] = [parsed async for parsed in _NORMALIZER_MAP[id_prefix](record, 0)]
+                await redis.xack(READ_STREAM, READ_GROUP, msg_id)
                 if not raw_nodes:
                     continue
                 start_id = await _next_ids(redis, len(raw_nodes))
@@ -120,11 +122,11 @@ async def _normalize_worker(redis: Redis) -> None:
     await redis.incr(NORMALIZE_DONE_KEY)
 
 
-async def _batch_worker(redis: Redis) -> None:
+async def _batch_worker(redis: Redis, worker_id: int) -> None:
+    consumer = f"batch-{worker_id}"
     batch: list[dict] = []
-    last_id = "0"
     while True:
-        entries = await redis.xread({NORMALIZE_STREAM: last_id}, count=100, block=500)
+        entries = await redis.xreadgroup(NORMALIZE_GROUP, consumer, {NORMALIZE_STREAM: ">"}, count=100, block=500)
         if not entries:
             if int(await redis.get(NORMALIZE_DONE_KEY) or 0) >= NORMALIZE_WORKERS:
                 if batch:
@@ -133,7 +135,7 @@ async def _batch_worker(redis: Redis) -> None:
             continue
         for _, messages in entries:
             for msg_id, data in messages:
-                last_id = msg_id
+                await redis.xack(NORMALIZE_STREAM, NORMALIZE_GROUP, msg_id)
                 batch.append(json.loads(data[b"doc"]))
                 if len(batch) >= INSERT_BATCH_SIZE:
                     await redis.xadd(INSERT_STREAM, {"batch": json.dumps(batch)})
@@ -169,17 +171,18 @@ async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
     redis = Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=False)
     await redis.delete(NODE_ID_KEY, READ_STREAM, NORMALIZE_STREAM, INSERT_STREAM, READ_DONE_KEY, READ_DONE_KEY + ":all", NORMALIZE_DONE_KEY, BATCH_DONE_KEY)
-    try:
-        await redis.xgroup_create(INSERT_STREAM, INSERT_GROUP, id="0", mkstream=True)
-    except Exception:
-        pass
+    for stream, group in [(READ_STREAM, READ_GROUP), (NORMALIZE_STREAM, NORMALIZE_GROUP), (INSERT_STREAM, INSERT_GROUP)]:
+        try:
+            await redis.xgroup_create(stream, group, id="0", mkstream=True)
+        except Exception:
+            pass
 
     n_readers = len(DATASETS)
     for _, parquet_path, id_prefix in DATASETS:
         asyncio.create_task(_reader_worker(parquet_path, id_prefix, redis, n_readers))
 
-    normalize_tasks = [asyncio.create_task(_normalize_worker(redis)) for _ in range(NORMALIZE_WORKERS)]
-    batch_tasks = [asyncio.create_task(_batch_worker(redis)) for _ in range(BATCH_WORKERS)]
+    normalize_tasks = [asyncio.create_task(_normalize_worker(redis, i)) for i in range(NORMALIZE_WORKERS)]
+    batch_tasks = [asyncio.create_task(_batch_worker(redis, i)) for i in range(BATCH_WORKERS)]
     insert_tasks = [asyncio.create_task(_insert_worker(redis, i)) for i in range(INSERT_WORKERS)]
 
     await asyncio.gather(*normalize_tasks, *batch_tasks, *insert_tasks)
