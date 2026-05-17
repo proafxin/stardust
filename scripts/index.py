@@ -375,6 +375,7 @@ async def phase_disambiguation() -> None:
             batch_texts,
             normalize_embeddings=True,
             show_progress_bar=False,
+            batch_size=EMBEDDING_BATCH_SIZE,
         )
         async with SessionLocal() as session:
             for atom_id, vec, text_val in zip(batch_ids, vecs, batch_texts, strict=False):

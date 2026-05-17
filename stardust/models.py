@@ -3,7 +3,7 @@ from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-EMBEDDING_DIM = 1024
+from stardust.config import EMBEDDING_DIM
 
 
 class Base(DeclarativeBase):

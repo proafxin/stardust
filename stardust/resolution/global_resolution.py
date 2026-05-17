@@ -17,7 +17,7 @@ class CanonicalEntity:
 
 
 def _batched_encode(embedder, texts: list[str]) -> np.ndarray:
-    vecs = [embedder.encode(texts[i : i + EMBEDDING_BATCH_SIZE], normalize_embeddings=True) for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)]
+    vecs = [embedder.encode(texts[i : i + EMBEDDING_BATCH_SIZE], normalize_embeddings=True, batch_size=EMBEDDING_BATCH_SIZE) for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)]
     return np.vstack(vecs) if len(vecs) > 1 else vecs[0]
 
 
