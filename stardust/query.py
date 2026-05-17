@@ -2,7 +2,7 @@ import operator
 from dataclasses import dataclass
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import cast, select, text
+from sqlalchemy import cast, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
@@ -21,48 +21,37 @@ class RankedAtom:
     score: float
 
 
-def _tree_node_models(nodes: list[Node], doc_id: str) -> list[TreeNodeModel]:
-    return [
-        TreeNodeModel(
-            id=node.id,
-            doc_id=doc_id,
-            parent_id=node.parent_id,
-            node_type=node.node_type,
-            modality=node.modality.value,
-            value=node.value,
-            raw_offset=node.raw_offset.model_dump(),
-            clean_offset=node.clean_offset.model_dump(),
-            nlp_attributes=[],
-            disambiguation=None,
-        )
-        for node in nodes
-    ]
-
-
-def _atom_models(nodes: list[Node], atoms: list[int], doc_id: str) -> list[AtomModel]:
-    atom_set = set(atoms)
-    return [
-        AtomModel(
-            id=node.id,
-            doc_id=doc_id,
-            parent_id=node.parent_id,
-            value=node.value,
-            raw_offset=node.raw_offset.model_dump(),
-            clean_offset=node.clean_offset.model_dump(),
-            nlp_attributes=[],
-            disambiguation=None,
-            embedding=None,
-        )
-        for node in nodes
-        if node.id in atom_set
-    ]
+_INSERT_CHUNK = 3_000  # 9 cols in tree_nodes, 8 in atoms → safe under 32767 param limit
 
 
 async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: AsyncSession) -> None:
-    all_tree_nodes = [m for doc_id, nodes, _ in docs for m in _tree_node_models(nodes, doc_id)]
-    all_atoms = [m for doc_id, nodes, atoms in docs for m in _atom_models(nodes, atoms, doc_id)]
-    await session.run_sync(lambda s: s.bulk_save_objects(all_tree_nodes))
-    await session.run_sync(lambda s: s.bulk_save_objects(all_atoms))
+    atom_set_per_doc = {doc_id: set(atoms) for doc_id, _, atoms in docs}
+    tree_rows = [
+        {
+            "id": node.id, "doc_id": doc_id, "parent_id": node.parent_id,
+            "node_type": node.node_type, "modality": node.modality.value,
+            "value": node.value, "raw_offset": node.raw_offset.model_dump(),
+            "clean_offset": node.clean_offset.model_dump(), "nlp_attributes": [],
+            "disambiguation": None,
+        }
+        for doc_id, nodes, _ in docs
+        for node in nodes
+    ]
+    atom_rows = [
+        {
+            "id": node.id, "doc_id": doc_id, "parent_id": node.parent_id,
+            "value": node.value, "raw_offset": node.raw_offset.model_dump(),
+            "clean_offset": node.clean_offset.model_dump(), "nlp_attributes": [],
+            "disambiguation": None, "embedding": None,
+        }
+        for doc_id, nodes, _ in docs
+        for node in nodes
+        if node.id in atom_set_per_doc[doc_id]
+    ]
+    for i in range(0, len(tree_rows), _INSERT_CHUNK):
+        await session.execute(insert(TreeNodeModel), tree_rows[i : i + _INSERT_CHUNK])
+    for i in range(0, len(atom_rows), _INSERT_CHUNK):
+        await session.execute(insert(AtomModel), atom_rows[i : i + _INSERT_CHUNK])
     await session.commit()
 
 

@@ -22,11 +22,7 @@ DATASETS: list[tuple[str, Path, str]] = [
     ("crag_open", DATA_DIR / "crag" / "open" / "train.parquet", "crag_open"),
 ]
 
-_NORMALIZERS = {
-    "hotpotqa": normalize_hotpotqa,
-    "qasper": normalize_qasper,
-    "crag_open": normalize_crag,
-}
+_NORMALIZERS = {"hotpotqa": normalize_hotpotqa, "qasper": normalize_qasper, "crag_open": normalize_crag}
 
 
 async def main() -> None:

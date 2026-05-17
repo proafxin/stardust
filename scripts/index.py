@@ -6,7 +6,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import tiktoken
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE
 from stardust.db import SessionLocal
@@ -50,14 +50,24 @@ def _token_count(text: str) -> int:
 # ── Phase 1: Normalize and persist ──────────────────────────────────────────
 
 
-NORMALIZE_BATCH_SIZE = 10_000
+NORMALIZE_BATCH_SIZE = 50_000
 
 
-async def _normalize_batch(
-    records: list, start_id: int, normalizer: Any, id_prefix: str, batch_offset: int
-) -> tuple[list[tuple[str, list[Node], list[int]]], int]:
+NORMALIZE_WORKERS = 4
+INSERT_WORKERS = 2
+
+
+async def _normalize_worker(
+    records: list,
+    id_prefix: str,
+    start_id: int,
+    batch_offset: int,
+    normalizer: Any,
+    queue: asyncio.Queue,
+) -> int:
+    """Returns the next available id after processing all records."""
     counter = start_id
-    result: list[tuple[str, list[Node], list[int]]] = []
+    docs: list[tuple[str, list[Node], list[int]]] = []
     for i, record in enumerate(records):
         doc_id = f"{id_prefix}_{batch_offset + i}"
         nodes: list[Node] = []
@@ -68,33 +78,67 @@ async def _normalize_batch(
                 atoms.append(parsed.node.id)
         if nodes:
             counter = max(n.id for n in nodes) + 1
-        result.append((doc_id, nodes, atoms))
-    return result, counter
+        docs.append((doc_id, nodes, atoms))
+        if len(docs) >= NORMALIZE_BATCH_SIZE:
+            await queue.put(docs)
+            docs = []
+    if docs:
+        await queue.put(docs)
+    return counter
+
+
+async def _insert_worker(queue: asyncio.Queue, sentinel: object) -> None:
+    while True:
+        docs = await queue.get()
+        if docs is sentinel:
+            queue.task_done()
+            break
+        async with SessionLocal() as session:
+            await insert_index(docs, session)
+        queue.task_done()
 
 
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
+    async with SessionLocal() as session:
+        await session.execute(text("DROP INDEX IF EXISTS ix_atoms_embedding"))
+        await session.commit()
+    log.info("phase 1: dropped hnsw index")
     normalizer_map = {
         "hotpotqa": normalize_hotpotqa,
         "qasper": normalize_qasper,
         "crag_open": normalize_crag,
     }
+    sentinel = object()
+    # maxsize provides backpressure: normalizers block if inserters fall behind
+    queue: asyncio.Queue = asyncio.Queue(maxsize=INSERT_WORKERS * 2)
+    inserters = [
+        asyncio.create_task(_insert_worker(queue, sentinel))
+        for _ in range(INSERT_WORKERS)
+    ]
     global_counter = 0
     for dataset_name, parquet_path, id_prefix in DATASETS:
-        table = pq.read_table(parquet_path)
-        records = table.to_pylist()
+        records = pq.read_table(parquet_path).to_pylist()
         if N:
             records = records[:N]
         normalizer = normalizer_map[dataset_name]
         total = len(records)
-        for batch_start in range(0, total, NORMALIZE_BATCH_SIZE):
-            batch = records[batch_start : batch_start + NORMALIZE_BATCH_SIZE]
-            docs, global_counter = await _normalize_batch(
-                batch, global_counter, normalizer, id_prefix, batch_start
-            )
-            async with SessionLocal() as session:
-                await insert_index(docs, session)
-            log.info("phase 1 [%s]: %d/%d records", dataset_name, min(batch_start + NORMALIZE_BATCH_SIZE, total), total)
+        chunk = max(1, total // NORMALIZE_WORKERS)
+        # pre-assign non-overlapping ID ranges per worker: stride = chunk * max_nodes_per_record
+        id_stride = chunk * 20
+        normalizers = [
+            asyncio.create_task(_normalize_worker(
+                records[i : i + chunk], id_prefix, global_counter + (i // chunk) * id_stride, i, normalizer, queue
+            ))
+            for i in range(0, total, chunk)
+        ]
+        await asyncio.gather(*normalizers)
+        global_counter += len(normalizers) * id_stride
+        log.info("phase 1 [%s]: %d records normalized", dataset_name, total)
+    for _ in range(INSERT_WORKERS):
+        await queue.put(sentinel)
+    await asyncio.gather(*inserters)
+    log.info("phase 1: done")
 
 
 # ── Phase 2: NLP extraction ──────────────────────────────────────────────────
@@ -293,6 +337,14 @@ async def phase_disambiguation() -> None:
 
     async with SessionLocal() as session:
         await insert_canonical_entities(global_entities, "global", session)
+
+    async with SessionLocal() as session:
+        await session.execute(text(
+            "CREATE INDEX ix_atoms_embedding ON atoms USING hnsw (embedding vector_cosine_ops) "
+            "WITH (m = 16, ef_construction = 64)"
+        ))
+        await session.commit()
+    log.info("phase 4: hnsw index created")
 
     log.info("phase 4: done")
 
