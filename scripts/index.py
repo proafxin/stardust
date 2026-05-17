@@ -18,7 +18,7 @@ from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_nlp
-from stardust.resolution.global_resolution import merge_across_documents
+from stardust.resolution.global_resolution import merge_across_records
 from stardust.resolution.local import (
     _pronoun_spans,
     build_batch_prompt,
@@ -310,9 +310,9 @@ async def phase_llm() -> None:
 # ── Phase 4: Disambiguation + embedding ─────────────────────────────────────
 
 
-async def _process_doc_disambiguation(doc_id: str) -> tuple[str, dict]:
+async def _process_record_disambiguation(record_id: str) -> tuple[str, dict]:
     async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel).where(AtomModel.doc_id == doc_id))
+        result = await session.execute(select(AtomModel).where(AtomModel.doc_id == record_id))
         atom_rows = result.scalars().all()
 
     nodes = {}
@@ -336,7 +336,7 @@ async def _process_doc_disambiguation(doc_id: str) -> tuple[str, dict]:
 
     index = AtomIndex(nodes=nodes, children={}, atoms=atoms, embeddings={})
     clusters = await resolve_local(index)
-    return doc_id, clusters
+    return record_id, clusters
 
 
 async def phase_disambiguation() -> None:
@@ -344,10 +344,10 @@ async def phase_disambiguation() -> None:
 
     async with SessionLocal() as session:
         result = await session.execute(select(AtomModel.doc_id).distinct())
-        doc_ids = [r.doc_id for r in result.fetchall()]
+        record_ids = [r.doc_id for r in result.fetchall()]
 
-    per_doc = list(await asyncio.gather(*[_process_doc_disambiguation(doc_id) for doc_id in doc_ids]))
-    global_entities = await merge_across_documents(per_doc)
+    per_record = list(await asyncio.gather(*[_process_record_disambiguation(record_id) for record_id in record_ids]))
+    global_entities = await merge_across_records(per_record)
     log.info("phase 4: %d canonical entities", len(global_entities))
 
     async with SessionLocal() as session:

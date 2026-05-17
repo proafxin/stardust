@@ -17,15 +17,15 @@ class CanonicalEntity:
 
 
 def _merge_sync(
-    per_doc: list[tuple[str, dict[str, list[list[tuple[str, SpanOffset, int]]]]]],
+    per_record: list[tuple[str, dict[str, list[list[tuple[str, SpanOffset, int]]]]]],
 ) -> list[CanonicalEntity]:
     embedder = load_embedder()
     by_type: dict[str, list[tuple[str, list[tuple[str, SpanOffset, int, str]]]]] = defaultdict(list)
 
-    for doc_id, clusters in per_doc:
+    for record_id, clusters in per_record:
         for ent_type, type_clusters in clusters.items():
             for cluster in type_clusters:
-                mentions = [(text, offset, atom_id, doc_id) for text, offset, atom_id in cluster]
+                mentions = [(text, offset, atom_id, record_id) for text, offset, atom_id in cluster]
                 by_type[ent_type].append((cluster[0][0], mentions))
 
     global_entities: list[CanonicalEntity] = []
@@ -47,7 +47,7 @@ def _merge_sync(
     return global_entities
 
 
-async def merge_across_documents(
-    per_doc: list[tuple[str, dict[str, list[list[tuple[str, SpanOffset, int]]]]]],
+async def merge_across_records(
+    per_record: list[tuple[str, dict[str, list[list[tuple[str, SpanOffset, int]]]]]],
 ) -> list[CanonicalEntity]:
-    return await asyncio.to_thread(_merge_sync, per_doc)
+    return await asyncio.to_thread(_merge_sync, per_record)
