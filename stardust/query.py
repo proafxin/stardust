@@ -28,10 +28,15 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
     atom_set_per_doc = {doc_id: set(atoms) for doc_id, _, atoms in docs}
     tree_rows = [
         {
-            "id": node.id, "doc_id": doc_id, "parent_id": node.parent_id,
-            "node_type": node.node_type, "modality": node.modality.value,
-            "value": node.value, "raw_offset": node.raw_offset.model_dump(),
-            "clean_offset": node.clean_offset.model_dump(), "nlp_attributes": [],
+            "id": node.id,
+            "doc_id": doc_id,
+            "parent_id": node.parent_id,
+            "node_type": node.node_type,
+            "modality": node.modality.value,
+            "value": node.value,
+            "raw_offset": node.raw_offset.model_dump(),
+            "clean_offset": node.clean_offset.model_dump(),
+            "nlp_attributes": [],
             "disambiguation": None,
         }
         for doc_id, nodes, _ in docs
@@ -39,10 +44,15 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
     ]
     atom_rows = [
         {
-            "id": node.id, "doc_id": doc_id, "parent_id": node.parent_id,
-            "value": node.value, "raw_offset": node.raw_offset.model_dump(),
-            "clean_offset": node.clean_offset.model_dump(), "nlp_attributes": [],
-            "disambiguation": None, "embedding": None,
+            "id": node.id,
+            "doc_id": doc_id,
+            "parent_id": node.parent_id,
+            "value": node.value,
+            "raw_offset": node.raw_offset.model_dump(),
+            "clean_offset": node.clean_offset.model_dump(),
+            "nlp_attributes": [],
+            "disambiguation": None,
+            "embedding": None,
         }
         for doc_id, nodes, _ in docs
         for node in nodes

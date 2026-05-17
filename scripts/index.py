@@ -46,12 +46,22 @@ DATASETS: list[tuple[str, Path, str]] = [
 NORMALIZE_WORKERS = 4
 BATCH_WORKERS = 2
 INSERT_WORKERS = 4
+PARQUET_BATCH_SIZE = 10_000
 INSERT_BATCH_SIZE = 50_000
+READ_STREAM = "stardust:stream:read"
 NORMALIZE_STREAM = "stardust:stream:normalize"
 INSERT_STREAM = "stardust:stream:insert"
 INSERT_GROUP = "stardust:insert:group"
 NODE_ID_KEY = "stardust:node_id_counter"
-DOCS_REMAINING_KEY = "stardust:docs_remaining"
+READ_DONE_KEY = "stardust:read_done"
+NORMALIZE_DONE_KEY = "stardust:normalize_done"
+BATCH_DONE_KEY = "stardust:batch_done"
+
+_NORMALIZER_MAP = {
+    "hotpotqa": normalize_hotpotqa,
+    "qasper": normalize_qasper,
+    "crag_open": normalize_crag,
+}
 
 
 async def _next_ids(redis: Redis, count: int) -> int:
@@ -59,38 +69,55 @@ async def _next_ids(redis: Redis, count: int) -> int:
     return int(end) - count
 
 
-async def _normalize_worker(
-    records: list,
-    id_prefix: str,
-    batch_offset: int,
-    normalizer: Any,
-    redis: Redis,
-) -> None:
-    for i, record in enumerate(records):
-        doc_id = f"{id_prefix}_{batch_offset + i}"
-        raw_nodes: list[Any] = []
-        async for parsed in normalizer(record, 0):
-            raw_nodes.append(parsed)
-        if not raw_nodes:
+async def _reader_worker(parquet_path: Path, id_prefix: str, redis: Redis, n_readers: int) -> None:
+    i = 0
+    for batch in pq.ParquetFile(parquet_path).iter_batches(batch_size=PARQUET_BATCH_SIZE):
+        for record in batch.to_pylist():
+            if N and i >= N:
+                break
+            await redis.xadd(READ_STREAM, {"record": json.dumps({"data": record, "id_prefix": id_prefix, "i": i})})
+            i += 1
+        if N and i >= N:
+            break
+    log.info("reader worker done: %s (%d records)", id_prefix, i)
+    if int(await redis.incr(READ_DONE_KEY)) >= n_readers:
+        await redis.set(READ_DONE_KEY + ":all", 1)
+
+
+async def _normalize_worker(redis: Redis) -> None:
+    last_id = "0"
+    while True:
+        entries = await redis.xread({READ_STREAM: last_id}, count=10, block=500)
+        if not entries:
+            if await redis.exists(READ_DONE_KEY + ":all"):
+                break
             continue
-        start_id = await _next_ids(redis, len(raw_nodes))
-        id_map = {j: start_id + j for j in range(len(raw_nodes))}
-        nodes: list[Node] = []
-        atoms: list[int] = []
-        for j, parsed in enumerate(raw_nodes):
-            node = parsed.node.model_copy(update={
-                "id": id_map[j],
-                "parent_id": id_map[parsed.node.parent_id] if parsed.node.parent_id is not None else None,
-            })
-            nodes.append(node)
-            if parsed.is_atom:
-                atoms.append(node.id)
-        await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
-            "doc_id": doc_id,
-            "nodes": [n.model_dump() for n in nodes],
-            "atoms": atoms,
-        })})
-    log.info("normalize worker done: %s offset=%d", id_prefix, batch_offset)
+        for _, messages in entries:
+            for msg_id, data in messages:
+                last_id = msg_id
+                payload = json.loads(data[b"record"])
+                record, id_prefix, i = payload["data"], payload["id_prefix"], payload["i"]
+                doc_id = f"{id_prefix}_{i}"
+                raw_nodes: list[Any] = [parsed async for parsed in _NORMALIZER_MAP[id_prefix](record, 0)]
+                if not raw_nodes:
+                    continue
+                start_id = await _next_ids(redis, len(raw_nodes))
+                id_map = {j: start_id + j for j in range(len(raw_nodes))}
+                nodes: list[Node] = []
+                atoms: list[int] = []
+                for j, parsed in enumerate(raw_nodes):
+                    node = parsed.node.model_copy(update={
+                        "id": id_map[j],
+                        "parent_id": id_map[parsed.node.parent_id] if parsed.node.parent_id is not None else None,
+                    })
+                    nodes.append(node)
+                    if parsed.is_atom:
+                        atoms.append(node.id)
+                await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
+                    "doc_id": doc_id, "nodes": [n.model_dump() for n in nodes], "atoms": atoms,
+                })})
+    log.info("normalize worker done")
+    await redis.incr(NORMALIZE_DONE_KEY)
 
 
 async def _batch_worker(redis: Redis) -> None:
@@ -99,8 +126,7 @@ async def _batch_worker(redis: Redis) -> None:
     while True:
         entries = await redis.xread({NORMALIZE_STREAM: last_id}, count=100, block=500)
         if not entries:
-            remaining = await redis.get(DOCS_REMAINING_KEY)
-            if remaining is not None and int(remaining) == 0:
+            if int(await redis.get(NORMALIZE_DONE_KEY) or 0) >= NORMALIZE_WORKERS:
                 if batch:
                     await redis.xadd(INSERT_STREAM, {"batch": json.dumps(batch)})
                 break
@@ -113,6 +139,7 @@ async def _batch_worker(redis: Redis) -> None:
                     await redis.xadd(INSERT_STREAM, {"batch": json.dumps(batch)})
                     batch = []
     log.info("batch worker done")
+    await redis.incr(BATCH_DONE_KEY)
 
 
 async def _insert_worker(redis: Redis) -> None:
@@ -120,63 +147,39 @@ async def _insert_worker(redis: Redis) -> None:
     while True:
         entries = await redis.xreadgroup(INSERT_GROUP, "worker", {INSERT_STREAM: ">"}, count=1, block=500)
         if not entries:
-            remaining = await redis.get(DOCS_REMAINING_KEY)
-            if remaining is not None and int(remaining) == 0:
+            if int(await redis.get(BATCH_DONE_KEY) or 0) >= BATCH_WORKERS:
                 break
             continue
         for _, messages in entries:
             for msg_id, data in messages:
                 batch_data = json.loads(data[b"batch"])
-                docs = [
-                    (d["doc_id"], [Node(**n) for n in d["nodes"]], d["atoms"])
-                    for d in batch_data
-                ]
+                docs = [(d["doc_id"], [Node(**n) for n in d["nodes"]], d["atoms"]) for d in batch_data]
                 async with SessionLocal() as session:
                     await insert_index(docs, session)
                 await redis.xack(INSERT_STREAM, INSERT_GROUP, msg_id)
                 inserted += len(docs)
-                await redis.decrby(DOCS_REMAINING_KEY, len(docs))
                 log.info("insert worker wrote %d docs, total: %d", len(docs), inserted)
     log.info("insert worker done: %d total", inserted)
 
 
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
-    normalizer_map = {
-        "hotpotqa": normalize_hotpotqa,
-        "qasper": normalize_qasper,
-        "crag_open": normalize_crag,
-    }
     redis = Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=False)
-    await redis.delete(NODE_ID_KEY, NORMALIZE_STREAM, INSERT_STREAM, DOCS_REMAINING_KEY)
+    await redis.delete(READ_STREAM, NORMALIZE_STREAM, INSERT_STREAM, READ_DONE_KEY, READ_DONE_KEY + ":all", NORMALIZE_DONE_KEY, BATCH_DONE_KEY)
     try:
         await redis.xgroup_create(INSERT_STREAM, INSERT_GROUP, id="0", mkstream=True)
     except Exception:
         pass
 
-    total_docs = 0
-    all_records: list[tuple[str, list, Any, str]] = []
-    for dataset_name, parquet_path, id_prefix in DATASETS:
-        records = pq.read_table(parquet_path).to_pylist()
-        if N:
-            records = records[:N]
-        total_docs += len(records)
-        all_records.append((dataset_name, records, normalizer_map[dataset_name], id_prefix))
+    n_readers = len(DATASETS)
+    for _, parquet_path, id_prefix in DATASETS:
+        asyncio.create_task(_reader_worker(parquet_path, id_prefix, redis, n_readers))
 
-    await redis.set(DOCS_REMAINING_KEY, total_docs)
-
-    for dataset_name, records, normalizer, id_prefix in all_records:
-        total = len(records)
-        chunk = max(1, total // NORMALIZE_WORKERS)
-        for i in range(0, total, chunk):
-            asyncio.create_task(_normalize_worker(
-                records[i : i + chunk], id_prefix, i, normalizer, redis
-            ))
-
+    normalize_tasks = [asyncio.create_task(_normalize_worker(redis)) for _ in range(NORMALIZE_WORKERS)]
     batch_tasks = [asyncio.create_task(_batch_worker(redis)) for _ in range(BATCH_WORKERS)]
     insert_tasks = [asyncio.create_task(_insert_worker(redis)) for _ in range(INSERT_WORKERS)]
 
-    await asyncio.gather(*batch_tasks, *insert_tasks)
+    await asyncio.gather(*normalize_tasks, *batch_tasks, *insert_tasks)
     await redis.aclose()
     log.info("phase 1: done")
 
@@ -273,18 +276,23 @@ async def phase_llm() -> None:
                                 continue
                             offset_val = entry.get("offset", [])
                             matched = next(
-                                (a for a in _pronoun_spans(attrs)
-                                 if len(offset_val) == 2 and a.offset.start == offset_val[0]),
+                                (
+                                    a
+                                    for a in _pronoun_spans(attrs)
+                                    if len(offset_val) == 2 and a.offset.start == offset_val[0]
+                                ),
                                 None,
                             )
                             if matched is None:
                                 continue
-                            disambiguation["pronoun_map"].append({
-                                "offset": matched.offset.model_dump(),
-                                "pronoun": entry.get("pronoun", matched.text),
-                                "local_entity": entry.get("local_entity", ""),
-                                "confidence": float(entry.get("confidence", 1.0)),
-                            })
+                            disambiguation["pronoun_map"].append(
+                                {
+                                    "offset": matched.offset.model_dump(),
+                                    "pronoun": entry.get("pronoun", matched.text),
+                                    "local_entity": entry.get("local_entity", ""),
+                                    "confidence": float(entry.get("confidence", 1.0)),
+                                }
+                            )
                         await session.execute(
                             update(AtomModel).where(AtomModel.id == atom_id).values(disambiguation=disambiguation)
                         )
@@ -368,11 +376,13 @@ async def phase_disambiguation() -> None:
         await insert_canonical_entities(global_entities, "global", session)
 
     async with SessionLocal() as session:
-        await session.execute(text(
-            "CREATE INDEX IF NOT EXISTS ix_atoms_embedding ON atoms "
-            "USING hnsw (embedding vector_cosine_ops) "
-            "WITH (m = 16, ef_construction = 64)"
-        ))
+        await session.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_atoms_embedding ON atoms "
+                "USING hnsw (embedding vector_cosine_ops) "
+                "WITH (m = 16, ef_construction = 64)"
+            )
+        )
         await session.commit()
     log.info("phase 4: hnsw index created")
 
