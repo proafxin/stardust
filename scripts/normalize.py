@@ -44,6 +44,7 @@ async def main() -> None:
         if N:
             records = records[:N]
         normalizer = _NORMALIZERS[dataset_name]
+        docs: list[tuple[str, list[Node], list[int]]] = []
         for i, record in enumerate(records):
             doc_id = f"{id_prefix}_{i}"
             nodes: list[Node] = []
@@ -54,10 +55,11 @@ async def main() -> None:
                     atoms.append(parsed.node.id)
             if nodes:
                 global_counter = max(n.id for n in nodes) + 1
-            async with SessionLocal() as session:
-                await insert_index(nodes, atoms, doc_id, session)
+            docs.append((doc_id, nodes, atoms))
             if i % 10 == 0:
                 log.info("[%s] %d/%d", dataset_name, i + 1, len(records))
+        async with SessionLocal() as session:
+            await insert_index(docs, session)
         log.info("%s done", dataset_name)
 
 

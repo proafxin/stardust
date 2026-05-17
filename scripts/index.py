@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-from itertools import starmap
 from pathlib import Path
 from typing import Any
 
@@ -56,11 +55,9 @@ NORMALIZE_BATCH_SIZE = 10_000
 
 async def _normalize_batch(
     records: list, start_id: int, normalizer: Any, id_prefix: str, batch_offset: int
-) -> tuple[list[Node], list[int], list[str], int]:
-    all_nodes: list[Node] = []
-    all_atoms: list[int] = []
-    all_doc_ids: list[str] = []
+) -> tuple[list[tuple[str, list[Node], list[int]]], int]:
     counter = start_id
+    result: list[tuple[str, list[Node], list[int]]] = []
     for i, record in enumerate(records):
         doc_id = f"{id_prefix}_{batch_offset + i}"
         nodes: list[Node] = []
@@ -71,10 +68,8 @@ async def _normalize_batch(
                 atoms.append(parsed.node.id)
         if nodes:
             counter = max(n.id for n in nodes) + 1
-        all_nodes.extend(nodes)
-        all_atoms.extend(atoms)
-        all_doc_ids.append(doc_id)
-    return all_nodes, all_atoms, all_doc_ids, counter
+        result.append((doc_id, nodes, atoms))
+    return result, counter
 
 
 async def phase_normalize() -> None:
@@ -94,14 +89,11 @@ async def phase_normalize() -> None:
         total = len(records)
         for batch_start in range(0, total, NORMALIZE_BATCH_SIZE):
             batch = records[batch_start : batch_start + NORMALIZE_BATCH_SIZE]
-            nodes, atoms, doc_ids, global_counter = await _normalize_batch(
+            docs, global_counter = await _normalize_batch(
                 batch, global_counter, normalizer, id_prefix, batch_start
             )
             async with SessionLocal() as session:
-                for doc_id, doc_nodes, doc_atoms in zip(
-                    doc_ids, _split_by_doc(nodes, doc_ids), _split_atoms_by_doc(atoms, nodes, doc_ids), strict=False
-                ):
-                    await insert_index(doc_nodes, doc_atoms, doc_id, session)
+                await insert_index(docs, session)
             log.info("phase 1 [%s]: %d/%d records", dataset_name, min(batch_start + NORMALIZE_BATCH_SIZE, total), total)
 
 
@@ -226,7 +218,7 @@ async def phase_llm() -> None:
                     log.warning("phase 3: batch %d failed (%s), retrying in 10s", i + 1, e)
                     await asyncio.sleep(10)
 
-    await asyncio.gather(*list(starmap(_run_batch, enumerate(batches))))
+    await asyncio.gather(*[_run_batch(i, batch) for i, batch in enumerate(batches)])
 
     log.info("phase 3: done")
 

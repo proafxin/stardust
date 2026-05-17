@@ -21,46 +21,48 @@ class RankedAtom:
     score: float
 
 
-async def insert_index(nodes: list[Node], atoms: list[int], doc_id: str, session: AsyncSession) -> None:
+def _tree_node_models(nodes: list[Node], doc_id: str) -> list[TreeNodeModel]:
+    return [
+        TreeNodeModel(
+            id=node.id,
+            doc_id=doc_id,
+            parent_id=node.parent_id,
+            node_type=node.node_type,
+            modality=node.modality.value,
+            value=node.value,
+            raw_offset=node.raw_offset.model_dump(),
+            clean_offset=node.clean_offset.model_dump(),
+            nlp_attributes=[],
+            disambiguation=None,
+        )
+        for node in nodes
+    ]
+
+
+def _atom_models(nodes: list[Node], atoms: list[int], doc_id: str) -> list[AtomModel]:
     atom_set = set(atoms)
-    await session.run_sync(
-        lambda s: s.bulk_save_objects(
-            [
-                TreeNodeModel(
-                    id=node.id,
-                    doc_id=doc_id,
-                    parent_id=node.parent_id,
-                    node_type=node.node_type,
-                    modality=node.modality.value,
-                    value=node.value,
-                    raw_offset=node.raw_offset.model_dump(),
-                    clean_offset=node.clean_offset.model_dump(),
-                    nlp_attributes=[],
-                    disambiguation=None,
-                )
-                for node in nodes
-            ]
+    return [
+        AtomModel(
+            id=node.id,
+            doc_id=doc_id,
+            parent_id=node.parent_id,
+            value=node.value,
+            raw_offset=node.raw_offset.model_dump(),
+            clean_offset=node.clean_offset.model_dump(),
+            nlp_attributes=[],
+            disambiguation=None,
+            embedding=None,
         )
-    )
-    await session.run_sync(
-        lambda s: s.bulk_save_objects(
-            [
-                AtomModel(
-                    id=node.id,
-                    doc_id=doc_id,
-                    parent_id=node.parent_id,
-                    value=node.value,
-                    raw_offset=node.raw_offset.model_dump(),
-                    clean_offset=node.clean_offset.model_dump(),
-                    nlp_attributes=[],
-                    disambiguation=None,
-                    embedding=None,
-                )
-                for node in nodes
-                if node.id in atom_set
-            ]
-        )
-    )
+        for node in nodes
+        if node.id in atom_set
+    ]
+
+
+async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: AsyncSession) -> None:
+    all_tree_nodes = [m for doc_id, nodes, _ in docs for m in _tree_node_models(nodes, doc_id)]
+    all_atoms = [m for doc_id, nodes, atoms in docs for m in _atom_models(nodes, atoms, doc_id)]
+    await session.run_sync(lambda s: s.bulk_save_objects(all_tree_nodes))
+    await session.run_sync(lambda s: s.bulk_save_objects(all_atoms))
     await session.commit()
 
 
@@ -88,9 +90,7 @@ async def insert_canonical_entities(entities: list[CanonicalEntity], doc_id: str
     await session.commit()
 
 
-async def dense_search(
-    query: str, session: AsyncSession, doc_id: str | None = None
-) -> list[RankedAtom]:
+async def dense_search(query: str, session: AsyncSession, doc_id: str | None = None) -> list[RankedAtom]:
     vec = cast(load_embedder().encode(query, normalize_embeddings=True).tolist(), Vector)
     distance = AtomModel.embedding.cosine_distance(vec).label("distance")
     stmt = (
@@ -104,9 +104,7 @@ async def dense_search(
     return [RankedAtom(id=r.id, doc_id=r.doc_id, value=r.value, score=r.score) for r in rows]
 
 
-async def sparse_search(
-    query: str, session: AsyncSession, doc_id: str | None = None
-) -> list[RankedAtom]:
+async def sparse_search(query: str, session: AsyncSession, doc_id: str | None = None) -> list[RankedAtom]:
     rows = (
         await session.execute(
             text("""
