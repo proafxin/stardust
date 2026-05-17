@@ -1,41 +1,7 @@
-import asyncio
 import json
 from collections import defaultdict
 
-import numpy as np
-
-from stardust.config import ENTITY_MERGE_THRESHOLD
-from stardust.registry import embedder as load_embedder
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
-
-_EQUIVALENT_TYPES: dict[str, str] = {
-    "ORG": "ORG",
-    "COMPANY": "ORG",
-    "CORP": "ORG",
-    "GPE": "LOCATION",
-    "LOC": "LOCATION",
-    "LOCATION": "LOCATION",
-    "PERSON": "PERSON",
-    "PER": "PERSON",
-    "NORP": "NORP",
-    "FAC": "FAC",
-    "PRODUCT": "PRODUCT",
-    "EVENT": "EVENT",
-    "WORK_OF_ART": "WORK_OF_ART",
-    "LAW": "LAW",
-    "LANGUAGE": "LANGUAGE",
-    "DATE": "DATE",
-    "TIME": "TIME",
-    "PERCENT": "PERCENT",
-    "MONEY": "MONEY",
-    "QUANTITY": "QUANTITY",
-    "ORDINAL": "ORDINAL",
-    "CARDINAL": "CARDINAL",
-}
-
-
-def canonicalize_type(ent_type: str) -> str:
-    return _EQUIVALENT_TYPES.get(ent_type.upper(), ent_type.upper())
 
 
 def _entity_spans(attrs: list[TokenAttributes]) -> list[tuple[str, str, SpanOffset]]:
@@ -44,19 +10,15 @@ def _entity_spans(attrs: list[TokenAttributes]) -> list[tuple[str, str, SpanOffs
     for attr in attrs:
         if attr.ent_iob_ == "B":
             if current:
-                spans.append(
-                    (" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset)
-                )
+                spans.append((" ".join(t.text for t in current), current[0].ent_type_, current[0].offset))
             current = [attr]
         elif attr.ent_iob_ == "I":
             current.append(attr)
         elif current:
-            spans.append(
-                (" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset)
-            )
+            spans.append((" ".join(t.text for t in current), current[0].ent_type_, current[0].offset))
             current = []
     if current:
-        spans.append((" ".join(t.text for t in current), canonicalize_type(current[0].ent_type_), current[0].offset))
+        spans.append((" ".join(t.text for t in current), current[0].ent_type_, current[0].offset))
     return spans
 
 
@@ -64,51 +26,17 @@ def _pronoun_spans(attrs: list[TokenAttributes]) -> list[TokenAttributes]:
     return [a for a in attrs if a.pos_ == "PRON"]
 
 
-def _cluster_sync(
-    items: list[tuple[str, SpanOffset, int]], threshold: float
-) -> list[list[tuple[str, SpanOffset, int]]]:
-    if not items:
-        return []
-    texts = [item[0] for item in items]
-    vecs = load_embedder().encode(texts, normalize_embeddings=True, show_progress_bar=False)
-    assigned = [False] * len(items)
-    clusters: list[list[int]] = []
-    for i in range(len(items)):
-        if assigned[i]:
-            continue
-        cluster = [i]
-        assigned[i] = True
-        for j in range(i + 1, len(items)):
-            if not assigned[j] and float(np.dot(vecs[i], vecs[j])) >= threshold:
-                cluster.append(j)
-                assigned[j] = True
-        clusters.append(cluster)
-    return [[items[idx] for idx in cluster] for cluster in clusters]
-
-
-async def cluster_by_embedding(
-    items: list[tuple[str, SpanOffset, int]],
-    threshold: float,
-) -> list[list[tuple[str, SpanOffset, int]]]:
-    return await asyncio.to_thread(_cluster_sync, items, threshold)
-
-
-async def resolve_local(
-    index: AtomIndex,
-) -> dict[str, list[list[tuple[str, SpanOffset, int]]]]:
-    by_type: dict[str, list[tuple[str, SpanOffset, int]]] = defaultdict(list)
+def collect_entity_mentions(
+    record_id: str, index: AtomIndex
+) -> list[tuple[str, str, SpanOffset, int, str]]:
+    """Return (surface, ent_type, offset, atom_id, atom_value) for all entity mentions in a record."""
+    mentions = []
     for atom_id in index.atoms:
         node = index.nodes[atom_id]
-        for text, ent_type, offset in _entity_spans(node.nlp_attributes):
-            by_type[ent_type].append((text, offset, atom_id))
-
-    clusters: dict[str, list[list[tuple[str, SpanOffset, int]]]] = {}
-    for ent_type, mentions in by_type.items():
-        clusters[ent_type] = await cluster_by_embedding(mentions, ENTITY_MERGE_THRESHOLD)
-
-    return clusters
-
-
+        for surface, ent_type, offset in _entity_spans(node.nlp_attributes):
+            if ent_type:
+                mentions.append((surface, ent_type, offset, atom_id, node.value))
+    return mentions
 def attach_pronoun_resolutions(
     index: AtomIndex,
     pronoun_map: list[dict],

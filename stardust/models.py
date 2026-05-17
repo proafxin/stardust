@@ -14,7 +14,7 @@ class TreeNodeModel(Base):
     __tablename__ = "tree_nodes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    doc_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tree_nodes.id"), nullable=True)
     node_type: Mapped[str] = mapped_column(String(32))
     modality: Mapped[str] = mapped_column(String(16))
@@ -32,7 +32,7 @@ class AtomModel(Base):
     __tablename__ = "atoms"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    doc_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tree_nodes.id"), nullable=True)
     value: Mapped[str] = mapped_column(Text)
     raw_offset: Mapped[dict] = mapped_column(JSONB)
@@ -42,7 +42,7 @@ class AtomModel(Base):
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
 
     __table_args__ = (
-        Index("ix_atoms_doc_id", "doc_id"),
+        Index("ix_atoms_record_id", "record_id"),
         Index(
             "ix_atoms_embedding",
             "embedding",
@@ -69,7 +69,7 @@ class EntityMentionModel(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"))
-    doc_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    record_id: Mapped[str] = mapped_column(String(256), nullable=False)
     canonical_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("canonical_entities.id"), nullable=True)
     text: Mapped[str] = mapped_column(Text)
     entity_type: Mapped[str] = mapped_column(String(64))

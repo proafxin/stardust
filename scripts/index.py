@@ -23,7 +23,7 @@ from stardust.resolution.local import (
     _pronoun_spans,
     build_batch_prompt,
     build_pronoun_prompt,
-    resolve_local,
+    collect_entity_mentions,
 )
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, Node, SpanOffset, TokenAttributes
 
@@ -116,7 +116,7 @@ async def _normalize_worker(redis: Redis, worker_id: int) -> None:
                     if parsed.is_atom:
                         atoms.append(node.id)
                 await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
-                    "doc_id": doc_id, "nodes": [n.model_dump() for n in nodes], "atoms": atoms,
+                    "record_id": doc_id, "nodes": [n.model_dump() for n in nodes], "atoms": atoms,
                 })})
     log.info("normalize worker done")
     await redis.incr(NORMALIZE_DONE_KEY)
@@ -158,7 +158,7 @@ async def _insert_worker(redis: Redis, worker_id: int) -> None:
         for _, messages in entries:
             for msg_id, data in messages:
                 batch_data = json.loads(data[b"batch"])
-                docs = [(d["doc_id"], [Node(**n) for n in d["nodes"]], d["atoms"]) for d in batch_data]
+                docs = [(d["record_id"], [Node(**n) for n in d["nodes"]], d["atoms"]) for d in batch_data]
                 async with SessionLocal() as session:
                     await insert_index(docs, session)
                 await redis.xack(INSERT_STREAM, INSERT_GROUP, msg_id)
@@ -310,9 +310,9 @@ async def phase_llm() -> None:
 # ── Phase 4: Disambiguation + embedding ─────────────────────────────────────
 
 
-async def _process_record_disambiguation(record_id: str) -> tuple[str, dict]:
+async def _process_record_disambiguation(record_id: str) -> tuple[str, list]:
     async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel).where(AtomModel.doc_id == record_id))
+        result = await session.execute(select(AtomModel).where(AtomModel.record_id == record_id))
         atom_rows = result.scalars().all()
 
     nodes = {}
@@ -335,27 +335,33 @@ async def _process_record_disambiguation(record_id: str) -> tuple[str, dict]:
         atoms.append(row.id)
 
     index = AtomIndex(nodes=nodes, children={}, atoms=atoms, embeddings={})
-    clusters = await resolve_local(index)
-    return record_id, clusters
+    mentions = collect_entity_mentions(record_id, index)
+    return record_id, mentions
 
 
 async def phase_disambiguation() -> None:
     log.info("phase 4: disambiguation + embedding")
 
     async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel.doc_id).distinct())
-        record_ids = [r.doc_id for r in result.fetchall()]
+        result = await session.execute(select(AtomModel.record_id).distinct())
+        record_ids = [r.record_id for r in result.fetchall()]
 
     per_record = list(await asyncio.gather(*[_process_record_disambiguation(record_id) for record_id in record_ids]))
     global_entities = await merge_across_records(per_record)
     log.info("phase 4: %d canonical entities", len(global_entities))
+
+    # build atom_id -> alias union map for enrichment
+    atom_aliases: dict[int, list[str]] = {}
+    for entity in global_entities:
+        for _, _, atom_id, _ in entity.mentions:
+            atom_aliases.setdefault(atom_id, []).extend(entity.aliases)
 
     async with SessionLocal() as session:
         result = await session.execute(select(AtomModel.id, AtomModel.value))
         rows = result.fetchall()
 
     atom_ids = [r.id for r in rows]
-    texts = [r.value for r in rows]
+    texts = [r.value + (" " + " ".join(atom_aliases[r.id]) if r.id in atom_aliases else "") for r in rows]
     total = len(atom_ids)
 
     for batch_start in range(0, total, EMBEDDING_BATCH_SIZE):
@@ -368,8 +374,12 @@ async def phase_disambiguation() -> None:
             show_progress_bar=False,
         )
         async with SessionLocal() as session:
-            for atom_id, vec in zip(batch_ids, vecs, strict=False):
-                await session.execute(update(AtomModel).where(AtomModel.id == atom_id).values(embedding=vec.tolist()))
+            for atom_id, vec, text_val in zip(batch_ids, vecs, batch_texts, strict=False):
+                await session.execute(
+                    update(AtomModel)
+                    .where(AtomModel.id == atom_id)
+                    .values(embedding=vec.tolist(), value=text_val)
+                )
             await session.commit()
         log.info("phase 4: embedded %d/%d", min(batch_start + EMBEDDING_BATCH_SIZE, total), total)
 
