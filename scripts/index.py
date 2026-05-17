@@ -51,18 +51,18 @@ def _token_count(text: str) -> int:
 # ── Phase 1: Normalize and persist ──────────────────────────────────────────
 
 
-NORMALIZE_BATCH_SIZE = 50_000
-
-
 NORMALIZE_WORKERS = 4
-INSERT_WORKERS = 2
-
-
+BATCH_WORKERS = 2
+INSERT_WORKERS = 4
+INSERT_BATCH_SIZE = 50_000
+NORMALIZE_STREAM = "stardust:stream:normalize"
+INSERT_STREAM = "stardust:stream:insert"
+INSERT_GROUP = "stardust:insert:group"
 NODE_ID_KEY = "stardust:node_id_counter"
+DOCS_REMAINING_KEY = "stardust:docs_remaining"
 
 
 async def _next_ids(redis: Redis, count: int) -> int:
-    """Atomically reserve `count` IDs, returns the first ID in the range."""
     end = await redis.incrby(NODE_ID_KEY, count)
     return int(end) - count
 
@@ -72,21 +72,17 @@ async def _normalize_worker(
     id_prefix: str,
     batch_offset: int,
     normalizer: Any,
-    queue: asyncio.Queue,
     redis: Redis,
 ) -> None:
-    docs: list[tuple[str, list[Node], list[int]]] = []
     for i, record in enumerate(records):
         doc_id = f"{id_prefix}_{batch_offset + i}"
-        # count nodes first to reserve a contiguous ID block atomically
         raw_nodes: list[Any] = []
         async for parsed in normalizer(record, 0):
             raw_nodes.append(parsed)
         if not raw_nodes:
             continue
         start_id = await _next_ids(redis, len(raw_nodes))
-        # remap local 0-based IDs to globally unique IDs
-        id_map: dict[int, int] = {j: start_id + j for j in range(len(raw_nodes))}
+        id_map = {j: start_id + j for j in range(len(raw_nodes))}
         nodes: list[Node] = []
         atoms: list[int] = []
         for j, parsed in enumerate(raw_nodes):
@@ -97,62 +93,98 @@ async def _normalize_worker(
             nodes.append(node)
             if parsed.is_atom:
                 atoms.append(node.id)
-        docs.append((doc_id, nodes, atoms))
-        if len(docs) >= NORMALIZE_BATCH_SIZE:
-            await queue.put(docs)
-            docs = []
-    if docs:
-        await queue.put(docs)
+        await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
+            "doc_id": doc_id,
+            "nodes": [n.model_dump() for n in nodes],
+            "atoms": atoms,
+        })})
+    log.info("normalize worker done: %s offset=%d", id_prefix, batch_offset)
 
 
-async def _insert_worker(queue: asyncio.Queue, sentinel: object) -> None:
+async def _batch_worker(redis: Redis) -> None:
+    batch: list[dict] = []
+    last_id = "0"
     while True:
-        docs = await queue.get()
-        if docs is sentinel:
-            queue.task_done()
-            break
-        async with SessionLocal() as session:
-            await insert_index(docs, session)
-        queue.task_done()
+        entries = await redis.xread({NORMALIZE_STREAM: last_id}, count=100, block=500)
+        if not entries:
+            remaining = await redis.get(DOCS_REMAINING_KEY)
+            if remaining is not None and int(remaining) == 0:
+                if batch:
+                    await redis.xadd(INSERT_STREAM, {"batch": json.dumps(batch)})
+                break
+            continue
+        for _, messages in entries:
+            for msg_id, data in messages:
+                last_id = msg_id
+                batch.append(json.loads(data[b"doc"]))
+                if len(batch) >= INSERT_BATCH_SIZE:
+                    await redis.xadd(INSERT_STREAM, {"batch": json.dumps(batch)})
+                    batch = []
+    log.info("batch worker done")
+
+
+async def _insert_worker(redis: Redis) -> None:
+    inserted = 0
+    while True:
+        entries = await redis.xreadgroup(INSERT_GROUP, "worker", {INSERT_STREAM: ">"}, count=1, block=500)
+        if not entries:
+            remaining = await redis.get(DOCS_REMAINING_KEY)
+            if remaining is not None and int(remaining) == 0:
+                break
+            continue
+        for _, messages in entries:
+            for msg_id, data in messages:
+                batch_data = json.loads(data[b"batch"])
+                docs = [
+                    (d["doc_id"], [Node(**n) for n in d["nodes"]], d["atoms"])
+                    for d in batch_data
+                ]
+                async with SessionLocal() as session:
+                    await insert_index(docs, session)
+                await redis.xack(INSERT_STREAM, INSERT_GROUP, msg_id)
+                inserted += len(docs)
+                await redis.decrby(DOCS_REMAINING_KEY, len(docs))
+                log.info("insert worker wrote %d docs, total: %d", len(docs), inserted)
+    log.info("insert worker done: %d total", inserted)
 
 
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
-    async with SessionLocal() as session:
-        await session.execute(text("DROP INDEX IF EXISTS ix_atoms_embedding"))
-        await session.commit()
-    log.info("phase 1: dropped hnsw index")
     normalizer_map = {
         "hotpotqa": normalize_hotpotqa,
         "qasper": normalize_qasper,
         "crag_open": normalize_crag,
     }
-    sentinel = object()
-    queue: asyncio.Queue = asyncio.Queue(maxsize=INSERT_WORKERS * 2)
-    inserters = [
-        asyncio.create_task(_insert_worker(queue, sentinel))
-        for _ in range(INSERT_WORKERS)
-    ]
     redis = Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=False)
-    await redis.delete(NODE_ID_KEY)
+    await redis.delete(NODE_ID_KEY, NORMALIZE_STREAM, INSERT_STREAM, DOCS_REMAINING_KEY)
+    try:
+        await redis.xgroup_create(INSERT_STREAM, INSERT_GROUP, id="0", mkstream=True)
+    except Exception:
+        pass
+
+    total_docs = 0
+    all_records: list[tuple[str, list, Any, str]] = []
     for dataset_name, parquet_path, id_prefix in DATASETS:
         records = pq.read_table(parquet_path).to_pylist()
         if N:
             records = records[:N]
-        normalizer = normalizer_map[dataset_name]
+        total_docs += len(records)
+        all_records.append((dataset_name, records, normalizer_map[dataset_name], id_prefix))
+
+    await redis.set(DOCS_REMAINING_KEY, total_docs)
+
+    for dataset_name, records, normalizer, id_prefix in all_records:
         total = len(records)
         chunk = max(1, total // NORMALIZE_WORKERS)
-        normalizers = [
+        for i in range(0, total, chunk):
             asyncio.create_task(_normalize_worker(
-                records[i : i + chunk], id_prefix, i, normalizer, queue, redis
+                records[i : i + chunk], id_prefix, i, normalizer, redis
             ))
-            for i in range(0, total, chunk)
-        ]
-        await asyncio.gather(*normalizers)
-        log.info("phase 1 [%s]: %d records normalized", dataset_name, total)
-    for _ in range(INSERT_WORKERS):
-        await queue.put(sentinel)
-    await asyncio.gather(*inserters)
+
+    batch_tasks = [asyncio.create_task(_batch_worker(redis)) for _ in range(BATCH_WORKERS)]
+    insert_tasks = [asyncio.create_task(_insert_worker(redis)) for _ in range(INSERT_WORKERS)]
+
+    await asyncio.gather(*batch_tasks, *insert_tasks)
     await redis.aclose()
     log.info("phase 1: done")
 
@@ -216,7 +248,6 @@ async def phase_llm() -> None:
         )
         rows = result.fetchall()
 
-    # build token-budget batches, skipping already-disambiguated atoms
     batches: list[list[tuple[int, str, list]]] = []
     current: list[tuple[int, str, list]] = []
     current_tokens = 0
@@ -322,12 +353,10 @@ async def phase_disambiguation() -> None:
         result = await session.execute(select(AtomModel.doc_id).distinct())
         doc_ids = [r.doc_id for r in result.fetchall()]
 
-    # process all docs concurrently
     per_doc = list(await asyncio.gather(*[_process_doc_disambiguation(doc_id) for doc_id in doc_ids]))
     global_entities = await merge_across_documents(per_doc)
     log.info("phase 4: %d canonical entities", len(global_entities))
 
-    # stream embedding in batches
     async with SessionLocal() as session:
         result = await session.execute(select(AtomModel.id, AtomModel.value))
         rows = result.fetchall()
@@ -356,7 +385,8 @@ async def phase_disambiguation() -> None:
 
     async with SessionLocal() as session:
         await session.execute(text(
-            "CREATE INDEX ix_atoms_embedding ON atoms USING hnsw (embedding vector_cosine_ops) "
+            "CREATE INDEX IF NOT EXISTS ix_atoms_embedding ON atoms "
+            "USING hnsw (embedding vector_cosine_ops) "
             "WITH (m = 16, ef_construction = 64)"
         ))
         await session.commit()
