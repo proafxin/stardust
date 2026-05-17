@@ -8,10 +8,10 @@ import pyarrow.parquet as pq
 from redis.asyncio import Redis
 from sqlalchemy import select, text, update
 
-from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, settings
+from stardust.config import EMBEDDING_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, NLP_COMMIT_BATCH_SIZE, settings
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
-from stardust.llm import ollama_complete
+from stardust.llm import ollama_complete, ollama_unload
 from stardust.models import AtomModel
 from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
@@ -200,7 +200,7 @@ async def phase_nlp() -> None:
     async with SessionLocal() as read_session:
         async with read_session.begin():
             stream = await read_session.stream(select(AtomModel.id, AtomModel.value, AtomModel.clean_offset))
-            async for partition in stream.partitions(NLP_BATCH_SIZE):
+            async for partition in stream.partitions(NLP_COMMIT_BATCH_SIZE):
                 atom_ids = [r.id for r in partition]
                 texts = [r.value for r in partition]
                 clean_starts = [r.clean_offset["start"] for r in partition]
@@ -307,6 +307,7 @@ async def phase_llm() -> None:
                 await asyncio.sleep(10)
 
     log.info("phase 3: done, ollama unloaded")
+    await ollama_unload()
 
 
 # ── Phase 4: Disambiguation + embedding ─────────────────────────────────────
