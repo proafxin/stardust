@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import AsyncGenerator
 
-from stardust.config import NLP_PIPE_BATCH_SIZE
+from stardust.config import NLP_BATCH_SIZE
 from stardust.registry import nlp as load_nlp
 from stardust.tree.atom import SpanOffset, TokenAttributes
 
@@ -33,7 +33,7 @@ async def extract_batch(
                 ],
             )
             for atom_id, doc, clean_start in zip(
-                atom_ids, nlp_model.pipe(texts, batch_size=NLP_PIPE_BATCH_SIZE), clean_starts, strict=False
+                atom_ids, nlp_model.pipe(texts, batch_size=NLP_BATCH_SIZE), clean_starts, strict=False
             )
         ]
 
