@@ -1,7 +1,8 @@
 import operator
 from dataclasses import dataclass
 
-from sqlalchemy import text
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import cast, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
@@ -88,41 +89,35 @@ async def insert_canonical_entities(entities: list[CanonicalEntity], doc_id: str
 
 
 async def dense_search(
-    query: str, session: AsyncSession, top_k: int = 10, doc_id: str | None = None
+    query: str, session: AsyncSession, doc_id: str | None = None
 ) -> list[RankedAtom]:
-    vec = load_embedder().encode(query, normalize_embeddings=True).tolist()
-    where = "AND doc_id = :doc_id" if doc_id else ""
-    rows = (
-        await session.execute(
-            text(f"""
-            SELECT id, doc_id, value,
-                   1 - (embedding <=> CAST(:vec AS vector)) AS score
-            FROM atoms
-            WHERE embedding IS NOT NULL {where}
-            ORDER BY embedding <=> CAST(:vec AS vector)
-            LIMIT :k
-        """),
-            {"vec": str(vec), "k": top_k, **({"doc_id": doc_id} if doc_id else {})},
-        )
-    ).fetchall()
+    vec = cast(load_embedder().encode(query, normalize_embeddings=True).tolist(), Vector)
+    distance = AtomModel.embedding.cosine_distance(vec).label("distance")
+    stmt = (
+        select(AtomModel.id, AtomModel.doc_id, AtomModel.value, (1 - distance).label("score"))
+        .where(AtomModel.embedding.is_not(None))
+        .order_by(distance)
+    )
+    if doc_id:
+        stmt = stmt.where(AtomModel.doc_id == doc_id)
+    rows = (await session.execute(stmt)).fetchall()
     return [RankedAtom(id=r.id, doc_id=r.doc_id, value=r.value, score=r.score) for r in rows]
 
 
 async def sparse_search(
-    query: str, session: AsyncSession, top_k: int = 10, doc_id: str | None = None
+    query: str, session: AsyncSession, doc_id: str | None = None
 ) -> list[RankedAtom]:
-    where = "AND doc_id = :doc_id" if doc_id else ""
     rows = (
         await session.execute(
-            text(f"""
+            text("""
             SELECT id, doc_id, value,
                    paradedb.score(id) AS score
             FROM atoms
-            WHERE value @@@ :query {where}
+            WHERE value @@@ :query
+            AND (:doc_id IS NULL OR doc_id = :doc_id)
             ORDER BY score DESC
-            LIMIT :k
         """),
-            {"query": query, "k": top_k, **({"doc_id": doc_id} if doc_id else {})},
+            {"query": query, "doc_id": doc_id},
         )
     ).fetchall()
     return [RankedAtom(id=r.id, doc_id=r.doc_id, value=r.value, score=r.score) for r in rows]
@@ -160,8 +155,9 @@ async def retrieve(
     use_reranker: bool = False,
 ) -> list[RankedAtom]:
     dense, sparse = (
-        await dense_search(query, session, top_k, doc_id),
-        await sparse_search(query, session, top_k, doc_id),
+        await dense_search(query, session, doc_id),
+        await sparse_search(query, session, doc_id),
     )
     fused = _rrf(dense, sparse)
-    return _rerank(query, fused, rerank_top_k) if use_reranker else fused[:rerank_top_k]
+    candidates = fused[:top_k]
+    return _rerank(query, candidates, rerank_top_k) if use_reranker else candidates

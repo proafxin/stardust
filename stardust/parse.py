@@ -102,8 +102,14 @@ async def normalize_hotpotqa(record: dict[str, Any], start_id: int = 0) -> Async
     corpus_text = "hotpotqa"
     corpus_clean, _ = _clean(corpus_text)
     corpus_node = _make_node(
-        state.counter, corpus_level, corpus_clean,
-        state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None,
+        state.counter,
+        corpus_level,
+        corpus_clean,
+        state.raw_pos,
+        len(corpus_text),
+        state.clean_pos,
+        len(corpus_clean),
+        None,
     )
     state.counter += 1
     state.raw_pos += len(corpus_text)
@@ -115,8 +121,14 @@ async def normalize_hotpotqa(record: dict[str, Any], start_id: int = 0) -> Async
     doc_clean, _ = _clean(title)
     doc_value = f"{corpus_clean} | {doc_clean}"
     doc_node = _make_node(
-        state.counter, doc_level, doc_value,
-        state.raw_pos, len(title), state.clean_pos, len(doc_clean), corpus_node.id,
+        state.counter,
+        doc_level,
+        doc_value,
+        state.raw_pos,
+        len(title),
+        state.clean_pos,
+        len(doc_clean),
+        corpus_node.id,
     )
     state.counter += 1
     state.raw_pos += len(title)
@@ -178,8 +190,14 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
     corpus_text = "crag_open"
     corpus_clean, _ = _clean(corpus_text)
     corpus_node = _make_node(
-        state.counter, corpus_level, corpus_clean,
-        state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None,
+        state.counter,
+        corpus_level,
+        corpus_clean,
+        state.raw_pos,
+        len(corpus_text),
+        state.clean_pos,
+        len(corpus_clean),
+        None,
     )
     state.counter += 1
     state.raw_pos += len(corpus_text)
@@ -231,8 +249,15 @@ async def _normalize_crag_search_results(
     clean_snippet, _ = _clean(snippet)
     atom_value = f"{page_value} | {clean_snippet}"
     atom_node = _make_node(
-        state.counter, atom_level, atom_value,
-        state.raw_pos, len(snippet), state.clean_pos, len(clean_snippet), page_node.id, True,
+        state.counter,
+        atom_level,
+        atom_value,
+        state.raw_pos,
+        len(snippet),
+        state.clean_pos,
+        len(clean_snippet),
+        page_node.id,
+        True,
     )
     state.counter += 1
     state.raw_pos += len(snippet)

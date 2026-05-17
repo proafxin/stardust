@@ -2,7 +2,6 @@ import logging
 import re
 from pathlib import Path
 
-import pyarrow.parquet as pq
 from datasets import load_dataset
 from pylatexenc.latex2text import LatexNodes2Text
 
