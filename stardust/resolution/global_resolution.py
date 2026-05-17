@@ -39,14 +39,15 @@ def _greedy_cluster(vecs: np.ndarray, threshold: float) -> list[list[int]]:
 
 def _disambiguate(
     per_record: list[tuple[str, list[tuple[str, str, SpanOffset, int, str]]]],
+    atom_texts: dict[int, str],
 ) -> list[CanonicalEntity]:
     embedder = load_embedder()
 
-    # collect all mentions: (surface, ent_type, offset, atom_id, record_id, atom_value)
+    # collect all mentions: (surface, ent_type, offset, atom_id, record_id, context)
     all_mentions: list[tuple[str, str, SpanOffset, int, str, str]] = []
     for record_id, mentions in per_record:
-        for surface, ent_type, offset, atom_id, atom_value in mentions:
-            all_mentions.append((surface, ent_type, offset, atom_id, record_id, atom_value))
+        for surface, ent_type, offset, atom_id, context in mentions:
+            all_mentions.append((surface, ent_type, offset, atom_id, record_id, context))
 
     if not all_mentions:
         return []
@@ -55,7 +56,6 @@ def _disambiguate(
     distinct_types = list({m[1] for m in all_mentions})
     type_vecs = _batched_encode(embedder, distinct_types)
     type_clusters = _greedy_cluster(type_vecs, ENTITY_MERGE_THRESHOLD)
-    # map each original type to its canonical type (first member of cluster)
     type_to_canonical: dict[str, str] = {}
     for cluster in type_clusters:
         canonical_type = distinct_types[cluster[0]]
@@ -64,29 +64,27 @@ def _disambiguate(
 
     # step 2: group mentions by canonical type
     by_type: dict[str, list[tuple[str, SpanOffset, int, str, str]]] = defaultdict(list)
-    for surface, ent_type, offset, atom_id, record_id, atom_value in all_mentions:
+    for surface, ent_type, offset, atom_id, record_id, context in all_mentions:
         canonical_type = type_to_canonical[ent_type]
-        by_type[canonical_type].append((surface, offset, atom_id, record_id, atom_value))
+        by_type[canonical_type].append((surface, offset, atom_id, record_id, context))
 
-    # step 3: within each canonical type, embed full atom context and cluster at ENTITY_MERGE_THRESHOLD
-    # then merge across records at GLOBAL_MERGE_THRESHOLD
+    # step 3: embed atom_value + context per mention, cluster locally then globally
     global_entities: list[CanonicalEntity] = []
     for canonical_type, mentions in by_type.items():
-        # embed atom value (full context) for each mention
-        atom_texts = [m[4] for m in mentions]
-        vecs = _batched_encode(embedder, atom_texts)
+        embed_texts = [
+            atom_texts.get(atom_id, "") + " " + context
+            for _, _, atom_id, _, context in mentions
+        ]
+        vecs = _batched_encode(embedder, embed_texts)
 
-        # local clusters at ENTITY_MERGE_THRESHOLD
         local_clusters = _greedy_cluster(vecs, ENTITY_MERGE_THRESHOLD)
 
-        # represent each local cluster by centroid for global merge
         cluster_vecs = np.array([
             np.mean(vecs[[idx for idx in cluster]], axis=0)
             for cluster in local_clusters
         ])
         cluster_vecs = cluster_vecs / np.linalg.norm(cluster_vecs, axis=1, keepdims=True)
 
-        # global merge at GLOBAL_MERGE_THRESHOLD
         global_clusters = _greedy_cluster(cluster_vecs, GLOBAL_MERGE_THRESHOLD)
 
         for global_cluster in global_clusters:
@@ -102,5 +100,6 @@ def _disambiguate(
 
 async def merge_across_records(
     per_record: list[tuple[str, list[tuple[str, str, SpanOffset, int, str]]]],
+    atom_texts: dict[int, str],
 ) -> list[CanonicalEntity]:
-    return await asyncio.to_thread(_disambiguate, per_record)
+    return await asyncio.to_thread(_disambiguate, per_record, atom_texts)

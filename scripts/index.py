@@ -350,7 +350,13 @@ async def phase_disambiguation() -> None:
         record_ids = [r.record_id for r in result.fetchall()]
 
     per_record = list(await asyncio.gather(*[_process_record_disambiguation(record_id) for record_id in record_ids]))
-    global_entities = await merge_across_records(per_record)
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(AtomModel.id, AtomModel.value))
+        rows = result.fetchall()
+    atom_texts = {r.id: r.value for r in rows}
+
+    global_entities = await merge_across_records(per_record, atom_texts)
     log.info("phase 4: %d canonical entities", len(global_entities))
 
     # build atom_id -> alias union map for enrichment
@@ -358,10 +364,6 @@ async def phase_disambiguation() -> None:
     for entity in global_entities:
         for _, _, atom_id, _ in entity.mentions:
             atom_aliases.setdefault(atom_id, []).extend(entity.aliases)
-
-    async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel.id, AtomModel.value))
-        rows = result.fetchall()
 
     atom_ids = [r.id for r in rows]
     texts = [r.value + (" " + " ".join(atom_aliases[r.id]) if r.id in atom_aliases else "") for r in rows]

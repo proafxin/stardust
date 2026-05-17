@@ -25,14 +25,47 @@ def _pronoun_spans(attrs: list[TokenAttributes]) -> list[TokenAttributes]:
     return [a for a in attrs if a.pos_ == "PRON"]
 
 
-def collect_entity_mentions(record_id: str, index: AtomIndex) -> list[tuple[str, str, SpanOffset, int, str]]:
-    """Return (surface, ent_type, offset, atom_id, atom_value) for all entity mentions in a record."""
+def _relation_triples(attrs: list[TokenAttributes], entity_start: int, entity_end: int) -> str:
+    entity_indices = {i for i, a in enumerate(attrs) if entity_start <= a.offset.start < entity_end}
+    triples: list[str] = []
+    for i, token in enumerate(attrs):
+        if i not in entity_indices:
+            continue
+        if token.dep_ in ("nsubj", "nsubjpass"):
+            head = next((a for a in attrs if a.dep_ == "ROOT"), None)
+            if head:
+                obj = next((a for a in attrs if a.dep_ in ("attr", "dobj", "pobj")), None)
+                if obj:
+                    triples.append(f"{token.text} {head.text} {obj.text}")
+        elif token.dep_ in ("attr", "appos"):
+            subj = next((a for a in attrs if a.dep_ in ("nsubj", "nsubjpass")), None)
+            if subj:
+                triples.append(f"{subj.text} is {token.text}")
+    return " ".join(triples)
+
+
+def _context_window(attrs: list[TokenAttributes], entity_start: int, entity_end: int, window: int = 5) -> str:
+    entity_indices = [i for i, a in enumerate(attrs) if entity_start <= a.offset.start < entity_end]
+    if not entity_indices:
+        return ""
+    lo = max(0, entity_indices[0] - window)
+    hi = min(len(attrs), entity_indices[-1] + window + 1)
+    return " ".join(a.text for a in attrs[lo:hi])
+
+
+def collect_entity_mentions(
+    record_id: str, index: AtomIndex
+) -> list[tuple[str, str, SpanOffset, int, str]]:
     mentions = []
     for atom_id in index.atoms:
         node = index.nodes[atom_id]
         for surface, ent_type, offset in _entity_spans(node.nlp_attributes):
-            if ent_type:
-                mentions.append((surface, ent_type, offset, atom_id, node.value))
+            if not ent_type:
+                continue
+            window = _context_window(node.nlp_attributes, offset.start, offset.end)
+            relations = _relation_triples(node.nlp_attributes, offset.start, offset.end)
+            context = " ".join(filter(None, [surface, window, relations]))
+            mentions.append((surface, ent_type, offset, atom_id, context))
     return mentions
 
 
