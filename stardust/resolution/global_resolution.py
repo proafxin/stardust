@@ -1,11 +1,15 @@
 import asyncio
+import logging
 from collections import defaultdict
 
 import numpy as np
+import torch
 
-from stardust.config import EMBEDDING_BATCH_SIZE, EMBEDDING_INTERNAL_BATCH_SIZE, ENTITY_MERGE_THRESHOLD, GLOBAL_MERGE_THRESHOLD
+from stardust.config import ENTITY_MERGE_THRESHOLD, GLOBAL_MERGE_THRESHOLD
 from stardust.registry import embedder as load_embedder
 from stardust.tree.atom import SpanOffset
+
+log = logging.getLogger(__name__)
 
 
 class CanonicalEntity:
@@ -16,8 +20,34 @@ class CanonicalEntity:
         self.aliases: list[str] = list({m[0] for m in mentions})
 
 
+def _dynamic_batches(texts: list[str]) -> list[list[str]]:
+    free_bytes = torch.cuda.mem_get_info()[0]
+    bytes_per_token = 24 * (1024 * 2 + 512 * 16 * 2) // 10
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_bytes = 0
+    budget = int(free_bytes * 0.9)
+    for text in texts:
+        tokens = min(len(text.split()), 512)
+        cost = tokens * bytes_per_token
+        if current and current_bytes + cost > budget:
+            batches.append(current)
+            current, current_bytes = [], 0
+        current.append(text)
+        current_bytes += cost
+    if current:
+        batches.append(current)
+    log.info("dynamic batches: %d texts → %d batches, free VRAM: %.2fGB, budget: %.2fGB, sizes: %s",
+             len(texts), len(batches), free_bytes / 1024**3, budget / 1024**3, [len(b) for b in batches])
+    return batches
+
+
 def _batched_encode(embedder, texts: list[str]) -> np.ndarray:
-    vecs = [embedder.encode(texts[i : i + EMBEDDING_BATCH_SIZE], normalize_embeddings=True, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE) for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)]
+    vecs = []
+    for batch in _dynamic_batches(texts):
+        with torch.no_grad():
+            vecs.append(embedder.encode(batch, normalize_embeddings=True))
+        torch.cuda.empty_cache()
     return np.vstack(vecs) if len(vecs) > 1 else vecs[0]
 
 
@@ -61,6 +91,8 @@ def _disambiguate(
         canonical_type = distinct_types[cluster[0]]
         for idx in cluster:
             type_to_canonical[distinct_types[idx]] = canonical_type
+    del type_vecs
+    torch.cuda.empty_cache()
 
     # step 2: group mentions by canonical type
     by_type: dict[str, list[tuple[str, SpanOffset, int, str, str]]] = defaultdict(list)

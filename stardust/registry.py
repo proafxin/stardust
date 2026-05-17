@@ -22,7 +22,9 @@ def unload_nlp() -> None:
 
 @cache
 def embedder() -> SentenceTransformer:
-    return SentenceTransformer(EMBEDDING_MODEL, device="cuda", model_kwargs={"torch_dtype": torch.bfloat16})
+    model = SentenceTransformer(EMBEDDING_MODEL, device="cuda", model_kwargs={"torch_dtype": torch.bfloat16})
+    model.eval()
+    return model
 
 
 @cache
