@@ -254,8 +254,11 @@ async def phase_llm() -> None:
     for row in rows:
         if row.disambiguation is not None:
             continue
-        entry = build_pronoun_prompt(row.id, row.value, [TokenAttributes(**a) for a in (row.nlp_attributes or [])])
-        tokens = len(json.dumps(entry).split()) if entry else len(row.value.split())
+        attrs = [TokenAttributes(**a) for a in (row.nlp_attributes or [])]
+        entry = build_pronoun_prompt(row.id, row.value, attrs)
+        if not entry:
+            continue
+        tokens = len(json.dumps(entry).split())
         if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT and current:
             batches.append(current)
             current, current_tokens = [], 0
