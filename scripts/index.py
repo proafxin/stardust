@@ -420,6 +420,8 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
         load_nlp()
         await phase_nlp()
         unload_nlp()
+    import gc
+    gc.collect()
     torch.cuda.empty_cache()
     load_embedder()
     if not skip_llm:

@@ -16,11 +16,14 @@ def nlp() -> Language:
 
 def unload_nlp() -> None:
     if nlp.cache_info().currsize:
+        import gc
         nlp.cache_clear()
+        gc.collect()
         torch.cuda.empty_cache()
         try:
             import cupy
             cupy.get_default_memory_pool().free_all_blocks()
+            cupy.get_default_pinned_memory_pool().free_all_blocks()
         except ImportError:
             pass
 
@@ -35,6 +38,9 @@ def embedder() -> SentenceTransformer:
 
 def unload_embedder() -> None:
     if embedder.cache_info().currsize:
+        model = embedder()
+        model.cpu()
+        del model
         embedder.cache_clear()
         torch.cuda.empty_cache()
 
