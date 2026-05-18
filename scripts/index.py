@@ -305,8 +305,10 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]], keep_alive: str
     raw = await ollama_complete(prompt, max_tokens=max(500, len(atom_data) * 50), keep_alive=keep_alive)
     try:
         start, end = raw.find("{"), raw.rfind("}") + 1
-        return json.loads(raw[start:end]) if start != -1 and end > 0 else {}
+        result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
+        return {str(k): v for k, v in result.items() if str(k).lstrip("-").isdigit() and isinstance(v, int)}
     except json.JSONDecodeError:
+        log.warning("phase 3: failed to parse LLM response: %s", raw[:200])
         return {}
 
 
@@ -349,7 +351,7 @@ async def phase_llm() -> None:
         entry = build_pronoun_prompt(row.id, row.value, attrs)
         if not entry:
             continue
-        tokens = len(json.dumps(entry).split())
+        tokens = len(entry["text"].split()) + len(entry["nominals"]) * 2
         if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT and current:
             batches.append(current)
             current, current_tokens = [], 0
@@ -375,8 +377,11 @@ async def phase_llm() -> None:
                 async with SessionLocal() as session:
                     atom_disambig: dict[int, list] = {atom_id: [] for atom_id, _, _ in batch}
                     for tid_str, rid in pronoun_map.items():
-                        tid = int(tid_str)
-                        if tid not in global_tokens or rid not in global_tokens:
+                        try:
+                            tid = int(tid_str)
+                        except ValueError:
+                            continue
+                        if not isinstance(rid, int) or tid not in global_tokens or rid not in global_tokens:
                             continue
                         atom_id, matched = global_tokens[tid]
                         _, referent_token = global_tokens[rid]

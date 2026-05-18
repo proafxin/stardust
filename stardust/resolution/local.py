@@ -120,14 +120,14 @@ def build_batch_prompt(atom_data: list[dict]) -> str:
     for a in atom_data:
         tokens = ", ".join(f"{token_counter + i}:{t.text}" for i, t in enumerate(a["nominals"]))
         token_counter += len(a["nominals"])
-        lines.append(f"[{a['atom_id']}] {a['text']} | tokens: {tokens}")
+        lines.append(f"[passage {a['atom_id']}] {a['text']} | tokens: {tokens}")
     examples = (
-        "[12] Sarah joined the firm. She became partner. | tokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
+        "[passage 12] Sarah joined the firm. She became partner. | tokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
         '=> {"2":0,"3":1}\n'
-        "[47] The treaty was signed by France. It came into force. [48] The agreement changed Europe. | tokens: 0:treaty, 1:France, 2:It, 3:agreement, 4:Europe\n"
+        "[passage 47] The treaty was signed by France. It came into force. [passage 48] The agreement changed Europe. | tokens: 0:treaty, 1:France, 2:It, 3:agreement, 4:Europe\n"
         '=> {"2":0,"3":0}'
     )
     return (
-        "Resolve coreference across all atoms. Output a single JSON object mapping token_id to referent_token_id. Only include tokens where a clear referent exists.\n\n"
+        "Resolve coreference across all passages. Output a single JSON object mapping token_id to referent_token_id. Only include tokens where a clear referent exists.\n\n"
         f"{examples}\n\n" + "\n".join(lines) + "\n=>"
     )
