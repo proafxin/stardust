@@ -1,8 +1,12 @@
+import json
 import re
 import unicodedata
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
+
+import mistletoe
+from mistletoe.ast_renderer import AstRenderer
 
 from stardust.config import ATOM_TOKEN_LIMIT
 from stardust.index import OffsetMap
@@ -51,6 +55,42 @@ def _token_count(text: str) -> int:
 
 def _buffer_tokens(buf: list[str]) -> int:
     return _token_count(" ".join(buf)) if buf else 0
+
+
+def _extract_text(node: dict) -> str:
+    t = node.get("type", "")
+    if t in ("Image", "BlockCode", "CodeFence", "ThematicBreak", "LineBreak", "EscapeSequence", "AutoLink"):
+        return ""
+    if t == "RawText":
+        return node.get("content", "")
+    return " ".join(_extract_text(c) for c in (node.get("children") or []))
+
+
+def _md_blocks(markdown: str) -> list[tuple[str, str]]:
+    with AstRenderer() as renderer:
+        ast = json.loads(renderer.render(mistletoe.Document(markdown)))
+    blocks: list[tuple[str, str]] = []
+    for node in ast.get("children") or []:
+        t = node.get("type", "")
+        if t in ("Heading", "SetextHeading"):
+            text = _extract_text(node).strip()
+            if text:
+                blocks.append(("heading", text))
+        elif t in ("Paragraph", "Quote"):
+            text = _extract_text(node).strip()
+            if text:
+                blocks.append(("paragraph", text))
+        elif t == "List":
+            text = _extract_text(node).strip()
+            if text:
+                blocks.append(("paragraph", text))
+        elif t == "Table":
+            for row in (node.get("children") or []):
+                cells = [_extract_text(cell).strip() for cell in (row.get("children") or [])]
+                text = " | ".join(c for c in cells if c)
+                if text:
+                    blocks.append(("paragraph", text))
+    return blocks
 
 def _make_node(
     nid: int,
@@ -177,10 +217,6 @@ async def normalize_qasper(record: dict[str, Any], start_id: int = 0) -> AsyncGe
         yield item
 
 
-def _is_markdown(text: str) -> bool:
-    return any(line.startswith("#") for line in text.splitlines())
-
-
 async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGenerator[ParsedNode]:
     corpus_level, page_level, section_level, atom_level = CRAG_LEVELS
     state = _State(counter=start_id)
@@ -188,14 +224,8 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
     corpus_text = "crag_open"
     corpus_clean, _ = _clean(corpus_text)
     corpus_node = _make_node(
-        state.counter,
-        corpus_level,
-        corpus_clean,
-        state.raw_pos,
-        len(corpus_text),
-        state.clean_pos,
-        len(corpus_clean),
-        None,
+        state.counter, corpus_level, corpus_clean,
+        state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None,
     )
     state.counter += 1
     state.raw_pos += len(corpus_text)
@@ -206,113 +236,47 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
     filename: str = (record.get("filename", "") or "")[:200]
     if not content.strip():
         return
-    if _is_markdown(content):
-        async for item in _normalize_crag_markdown(
-            filename, content, corpus_clean, corpus_node.id, page_level, section_level, atom_level, state
-        ):
-            yield item
-    else:
-        async for item in _normalize_crag_search_results(
-            filename, content, corpus_clean, corpus_node.id, page_level, atom_level, state
-        ):
-            yield item
 
-
-async def _normalize_crag_search_results(
-    page_name: str,
-    snippet: str,
-    corpus_value: str,
-    corpus_id: int,
-    page_level: str,
-    atom_level: str,
-    state: _State,
-) -> AsyncGenerator[ParsedNode]:
-    page_clean, _ = _clean(page_name)
-    page_value = f"{corpus_value} | {page_clean}"
-    page_node = _make_node(
-        state.counter,
-        page_level,
-        page_value,
-        state.raw_pos,
-        len(page_name),
-        state.clean_pos,
-        len(page_clean),
-        corpus_id,
-    )
-    state.counter += 1
-    state.raw_pos += len(page_name)
-    state.clean_pos += len(page_clean)
-    yield ParsedNode(node=page_node, is_atom=False)
-
-    clean_snippet, _ = _clean(snippet)
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", clean_snippet) if s.strip()]
-    buffer: list[str] = []
-    content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{page_value} | ")
-    for sentence in sentences:
-        if _buffer_tokens(buffer + [sentence]) > content_limit and buffer:
-            async for item in _flush_buffer(buffer, atom_level, page_value, page_node.id, state):
-                yield item
-        buffer.append(sentence)
-    async for item in _flush_buffer(buffer, atom_level, page_value, page_node.id, state):
-        yield item
-
-
-async def _normalize_crag_markdown(
-    page_name: str,
-    content: str,
-    corpus_value: str,
-    corpus_id: int,
-    page_level: str,
-    section_level: str,
-    atom_level: str,
-    state: _State,
-) -> AsyncGenerator[ParsedNode]:
-    filename = page_name[:200]
     page_clean, _ = _clean(filename)
-    page_value = f"{corpus_value} | {page_clean}"
+    page_value = f"{corpus_clean} | {page_clean}"
     page_node = _make_node(
-        state.counter, page_level, page_value, state.raw_pos, len(filename), state.clean_pos, len(page_clean), corpus_id
+        state.counter, page_level, page_value,
+        state.raw_pos, len(filename), state.clean_pos, len(page_clean), corpus_node.id,
     )
     state.counter += 1
     state.raw_pos += len(filename)
     state.clean_pos += len(page_clean)
     yield ParsedNode(node=page_node, is_atom=False)
 
+    blocks = _md_blocks(content)
+    if not blocks:
+        return
+
     current_section_id = page_node.id
     current_section_value = page_value
     buffer: list[str] = []
 
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
+    for block_type, text in blocks:
+        if block_type == "heading":
             async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
                 yield item
-            heading = stripped.lstrip("#").strip()
-            sec_clean, _ = _clean(heading)
+            sec_clean, _ = _clean(text)
             current_section_value = f"{page_value} | {sec_clean}"
             sec_node = _make_node(
-                state.counter,
-                section_level,
-                current_section_value,
-                state.raw_pos,
-                len(heading),
-                state.clean_pos,
-                len(sec_clean),
-                page_node.id,
+                state.counter, section_level, current_section_value,
+                state.raw_pos, len(text), state.clean_pos, len(sec_clean), page_node.id,
             )
             current_section_id = sec_node.id
             state.counter += 1
-            state.raw_pos += len(heading)
+            state.raw_pos += len(text)
             state.clean_pos += len(sec_clean)
             yield ParsedNode(node=sec_node, is_atom=False)
         else:
             content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{current_section_value} | ")
-            if _buffer_tokens(buffer + [stripped]) > content_limit and buffer:
+            if _buffer_tokens(buffer + [text]) > content_limit and buffer:
                 async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
                     yield item
-            buffer.append(stripped)
+            buffer.append(text)
 
     async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
         yield item
