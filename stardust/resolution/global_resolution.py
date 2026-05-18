@@ -57,7 +57,11 @@ def _encode(embedder, texts: list[str]) -> np.ndarray:
     return np.array(result)
 
 
-def _greedy_cluster(vecs: np.ndarray, threshold: float) -> list[list[int]]:
+def _shares_token(a: str, b: str) -> bool:
+    return bool(set(a.split()) & set(b.split()))
+
+
+def _greedy_cluster(vecs: np.ndarray, threshold: float, surfaces: list[str] | None = None) -> list[list[int]]:
     if len(vecs) == 0:
         return []
     vecs = vecs.astype(np.float32)
@@ -76,8 +80,9 @@ def _greedy_cluster(vecs: np.ndarray, threshold: float) -> list[list[int]]:
             if j == i or assigned[j]:
                 continue
             if dist >= threshold:
-                cluster.append(j)
-                assigned[j] = True
+                if surfaces is None or _shares_token(surfaces[i], surfaces[j]):
+                    cluster.append(j)
+                    assigned[j] = True
         clusters.append(cluster)
     return clusters
 
@@ -132,15 +137,21 @@ def _disambiguate(
             for idx in indices[1:]:
                 uf.union(indices[0], idx)
 
-        # step 5: subsumption — if norm(A) is a non-empty substring of norm(B), union them
-        for i in range(n):
-            if not norms[i]:
+        # step 5: subsumption — whole-word match of norm(A) within norm(B), sorted by length
+        unique_norms = sorted(set(norms), key=len)
+        norm_rep: dict[str, int] = {}
+        for norm in unique_norms:
+            for i, n in enumerate(norms):
+                if n == norm:
+                    norm_rep[norm] = i
+                    break
+        for i, short in enumerate(unique_norms):
+            if not short:
                 continue
-            for j in range(n):
-                if i == j or not norms[j] or norms[i] == norms[j]:
-                    continue
-                if norms[i] in norms[j]:
-                    uf.union(i, j)
+            pattern = re.compile(r'\b' + re.escape(short) + r'\b')
+            for long in unique_norms[i + 1:]:
+                if pattern.search(long):
+                    uf.union(norm_rep[short], norm_rep[long])
 
         # step 6: one representative per union-find group for embedding clustering
         groups: dict[int, list[int]] = defaultdict(list)
@@ -158,10 +169,12 @@ def _disambiguate(
         vecs = (atom_vecs + context_vecs) / 2
         vecs = vecs / np.linalg.norm(vecs, axis=1, keepdims=True)
 
-        local_clusters = _greedy_cluster(vecs, ENTITY_MERGE_THRESHOLD)
+        rep_surfaces = [_normalize(mentions[i][0]) for i in rep_indices]
+        local_clusters = _greedy_cluster(vecs, ENTITY_MERGE_THRESHOLD, rep_surfaces)
         cluster_vecs = np.array([np.mean(vecs[cluster], axis=0) for cluster in local_clusters])
         cluster_vecs = cluster_vecs / np.linalg.norm(cluster_vecs, axis=1, keepdims=True)
-        global_clusters = _greedy_cluster(cluster_vecs, GLOBAL_MERGE_THRESHOLD)
+        cluster_surfaces = [rep_surfaces[cluster[0]] for cluster in local_clusters]
+        global_clusters = _greedy_cluster(cluster_vecs, GLOBAL_MERGE_THRESHOLD, cluster_surfaces)
 
         for global_cluster in global_clusters:
             merged: list[tuple[str, SpanOffset, int, str]] = []
@@ -170,7 +183,14 @@ def _disambiguate(
                 for mention_idx in groups[uf.find(rep_i)]:
                     surface, offset, atom_id, record_id, _ = mentions[mention_idx]
                     merged.append((surface, offset, atom_id, record_id))
-            global_entities.append(CanonicalEntity(canonical_type, merged))
+            freq: dict[str, int] = defaultdict(int)
+            for surface, _, _, _ in merged:
+                freq[surface] += 1
+            canonical_name = max(freq, key=lambda s: (freq[s], len(s)))
+            entity = CanonicalEntity(canonical_type, merged)
+            entity.canonical_name = canonical_name
+            entity.aliases = list({m[0] for m in merged})
+            global_entities.append(entity)
 
     return global_entities
 

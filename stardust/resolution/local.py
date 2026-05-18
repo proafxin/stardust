@@ -63,8 +63,7 @@ def collect_entity_mentions(
             if not ent_type:
                 continue
             window = _context_window(node.nlp_attributes, offset.start, offset.end)
-            relations = _relation_triples(node.nlp_attributes, offset.start, offset.end)
-            context = " ".join(filter(None, [surface, window, relations]))
+            context = " ".join(filter(None, [surface, window]))
             mentions.append((surface, ent_type, offset, atom_id, context))
         if node.disambiguation:
             for resolution in node.disambiguation.pronoun_map:

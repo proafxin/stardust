@@ -259,7 +259,7 @@ async def phase_llm() -> None:
 
     async with SessionLocal() as session:
         result = await session.execute(
-            select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes, AtomModel.disambiguation)
+            select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes, AtomModel.disambiguation, AtomModel.clean_offset)
         )
         rows = result.fetchall()
 
@@ -284,6 +284,7 @@ async def phase_llm() -> None:
         batches.append(current)
 
     log.info("phase 3: %d batches", len(batches))
+    clean_start_map = {r.id: r.clean_offset["start"] for r in rows}
 
     for i, batch in enumerate(batches):
         keep_alive = "0" if i == len(batches) - 1 else "5m"
@@ -294,15 +295,19 @@ async def phase_llm() -> None:
                     for atom_id, _value, nlp_attrs in batch:
                         disambiguation = {"pronoun_map": []}
                         attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
+                        clean_start = clean_start_map.get(atom_id, 0)
                         for entry in pronoun_map:
                             if entry.get("atom_id") != atom_id:
                                 continue
                             offset_val = entry.get("offset", [])
+                            if len(offset_val) != 2:
+                                continue
+                            abs_start = clean_start + offset_val[0]
                             matched = next(
                                 (
                                     a
                                     for a in _pronoun_spans(attrs)
-                                    if len(offset_val) == 2 and a.offset.start == offset_val[0]
+                                    if a.offset.start == abs_start
                                 ),
                                 None,
                             )
