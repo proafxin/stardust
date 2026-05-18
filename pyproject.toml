@@ -18,7 +18,7 @@ dependencies = [
     "mistletoe>=1.5.1",
     "pgvector>=0.4.2",
     "pillow>=12.2.0",
-    "polars",
+    "polars>=1.40.1",
     "pydantic-settings>=2.14.1",
     "pylatexenc>=2.10",
     "redis>=7.4.0",

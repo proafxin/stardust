@@ -31,7 +31,9 @@ async def ollama_complete(prompt: str, max_tokens: int = 4096, keep_alive: str =
 
 async def ollama_unload() -> None:
     proc = await asyncio.create_subprocess_exec(
-        "ollama", "stop", OLLAMA_MODEL,
+        "ollama",
+        "stop",
+        OLLAMA_MODEL,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )

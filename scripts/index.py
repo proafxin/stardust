@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import gc
 import hashlib
 import json
@@ -11,12 +12,18 @@ import torch
 from redis.asyncio import Redis
 from sqlalchemy import select, text, update
 
-from stardust.config import ATOM_TOKEN_LIMIT, EMBEDDING_BATCH_SIZE, EMBEDDING_INTERNAL_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, NLP_COMMIT_BATCH_SIZE, settings
+from stardust.config import (
+    ATOM_TOKEN_LIMIT,
+    EMBEDDING_INTERNAL_BATCH_SIZE,
+    LLM_BATCH_TOKEN_LIMIT,
+    NLP_COMMIT_BATCH_SIZE,
+    settings,
+)
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
 from stardust.models import AtomModel
-from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper, _token_count
+from stardust.parse import _token_count, normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
@@ -43,7 +50,6 @@ DATASETS: list[tuple[str, Path, str]] = [
 ]
 
 DISAMBIGUATION_CACHE = DATA_DIR / "disambiguation_cache.json"
-
 
 
 NORMALIZE_WORKERS = 4
@@ -91,6 +97,7 @@ async def _reader_worker(parquet_path: Path, id_prefix: str, redis: Redis, n_rea
 
 CROSS_RECORD_TOKEN_LIMIT = ATOM_TOKEN_LIMIT
 
+
 async def _normalize_worker(redis: Redis, worker_id: int) -> None:
     consumer = f"normalize-{worker_id}"
     buf_values: list[str] = []
@@ -101,9 +108,18 @@ async def _normalize_worker(redis: Redis, worker_id: int) -> None:
         if not buf_values or buf_node is None:
             return
         bundled = buf_node.model_copy(update={"value": " ".join(buf_values)})
-        await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
-            "record_id": doc_id, "nodes": [bundled.model_dump()], "atoms": [bundled.id],
-        })})
+        await redis.xadd(
+            NORMALIZE_STREAM,
+            {
+                "doc": json.dumps(
+                    {
+                        "record_id": doc_id,
+                        "nodes": [bundled.model_dump()],
+                        "atoms": [bundled.id],
+                    }
+                )
+            },
+        )
         buf_values.clear()
         buf_node = None
 
@@ -127,24 +143,33 @@ async def _normalize_worker(redis: Redis, worker_id: int) -> None:
                 non_atom_nodes: list[Node] = []
                 atom_nodes: list[Node] = []
                 for j, parsed in enumerate(raw_nodes):
-                    node = parsed.node.model_copy(update={
-                        "id": id_map[j],
-                        "parent_id": id_map[parsed.node.parent_id] if parsed.node.parent_id is not None else None,
-                    })
+                    node = parsed.node.model_copy(
+                        update={
+                            "id": id_map[j],
+                            "parent_id": id_map[parsed.node.parent_id] if parsed.node.parent_id is not None else None,
+                        }
+                    )
                     if parsed.is_atom:
                         atom_nodes.append(node)
                     else:
                         non_atom_nodes.append(node)
 
                 if non_atom_nodes:
-                    await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
-                        "record_id": doc_id,
-                        "nodes": [n.model_dump() for n in non_atom_nodes],
-                        "atoms": [],
-                    })})
+                    await redis.xadd(
+                        NORMALIZE_STREAM,
+                        {
+                            "doc": json.dumps(
+                                {
+                                    "record_id": doc_id,
+                                    "nodes": [n.model_dump() for n in non_atom_nodes],
+                                    "atoms": [],
+                                }
+                            )
+                        },
+                    )
 
                 for node in atom_nodes:
-                    if buf_values and _token_count(" ".join(buf_values + [node.value])) > CROSS_RECORD_TOKEN_LIMIT:
+                    if buf_values and _token_count(" ".join([*buf_values, node.value])) > CROSS_RECORD_TOKEN_LIMIT:
                         await _flush(doc_id)
                     buf_values.append(node.value)
                     buf_node = node.model_copy(update={"parent_id": None})
@@ -206,12 +231,23 @@ async def _insert_worker(redis: Redis, worker_id: int) -> None:
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
     redis = Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=False)
-    await redis.delete(NODE_ID_KEY, READ_STREAM, NORMALIZE_STREAM, INSERT_STREAM, READ_DONE_KEY, READ_DONE_KEY + ":all", NORMALIZE_DONE_KEY, BATCH_DONE_KEY)
-    for stream, group in [(READ_STREAM, READ_GROUP), (NORMALIZE_STREAM, NORMALIZE_GROUP), (INSERT_STREAM, INSERT_GROUP)]:
-        try:
+    await redis.delete(
+        NODE_ID_KEY,
+        READ_STREAM,
+        NORMALIZE_STREAM,
+        INSERT_STREAM,
+        READ_DONE_KEY,
+        READ_DONE_KEY + ":all",
+        NORMALIZE_DONE_KEY,
+        BATCH_DONE_KEY,
+    )
+    for stream, group in [
+        (READ_STREAM, READ_GROUP),
+        (NORMALIZE_STREAM, NORMALIZE_GROUP),
+        (INSERT_STREAM, INSERT_GROUP),
+    ]:
+        with contextlib.suppress(Exception):
             await redis.xgroup_create(stream, group, id="0", mkstream=True)
-        except Exception:
-            pass
 
     n_readers = len(DATASETS)
     for _, parquet_path, id_prefix in DATASETS:
@@ -234,23 +270,22 @@ async def phase_nlp() -> None:
     log.info("phase 2: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     done = 0
-    async with SessionLocal() as read_session:
-        async with read_session.begin():
-            stream = await read_session.stream(select(AtomModel.id, AtomModel.value, AtomModel.clean_offset))
-            async for partition in stream.partitions(NLP_COMMIT_BATCH_SIZE):
-                atom_ids = [r.id for r in partition]
-                texts = [r.value for r in partition]
-                clean_starts = [r.clean_offset["start"] for r in partition]
-                async with SessionLocal() as write_session:
-                    async for atom_id, attrs in extract_batch(atom_ids, texts, clean_starts):
-                        await write_session.execute(
-                            update(AtomModel)
-                            .where(AtomModel.id == atom_id)
-                            .values(nlp_attributes=[a.model_dump() for a in attrs])
-                        )
-                    await write_session.commit()
-                done += len(partition)
-                log.info("phase 2: %d atoms done", done)
+    async with SessionLocal() as read_session, read_session.begin():
+        stream = await read_session.stream(select(AtomModel.id, AtomModel.value, AtomModel.clean_offset))
+        async for partition in stream.partitions(NLP_COMMIT_BATCH_SIZE):
+            atom_ids = [r.id for r in partition]
+            texts = [r.value for r in partition]
+            clean_starts = [r.clean_offset["start"] for r in partition]
+            async with SessionLocal() as write_session:
+                async for atom_id, attrs in extract_batch(atom_ids, texts, clean_starts):
+                    await write_session.execute(
+                        update(AtomModel)
+                        .where(AtomModel.id == atom_id)
+                        .values(nlp_attributes=[a.model_dump() for a in attrs])
+                    )
+                await write_session.commit()
+            done += len(partition)
+            log.info("phase 2: %d atoms done", done)
 
 
 # ── Phase 3: LLM pronoun resolution (Ollama / Qwen3 4B) ─────────────────────
@@ -292,7 +327,13 @@ async def phase_llm() -> None:
 
     async with SessionLocal() as session:
         result = await session.execute(
-            select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes, AtomModel.disambiguation, AtomModel.clean_offset)
+            select(
+                AtomModel.id,
+                AtomModel.value,
+                AtomModel.nlp_attributes,
+                AtomModel.disambiguation,
+                AtomModel.clean_offset,
+            )
         )
         rows = result.fetchall()
 
@@ -337,11 +378,7 @@ async def phase_llm() -> None:
                                 continue
                             abs_start = clean_start + offset_val[0]
                             matched = next(
-                                (
-                                    a
-                                    for a in _pronoun_spans(attrs)
-                                    if a.offset.start == abs_start
-                                ),
+                                (a for a in _pronoun_spans(attrs) if a.offset.start == abs_start),
                                 None,
                             )
                             if matched is None:
@@ -358,7 +395,12 @@ async def phase_llm() -> None:
                             update(AtomModel).where(AtomModel.id == atom_id).values(disambiguation=disambiguation)
                         )
                     await session.commit()
-                log.info("phase 3: batch %d/%d done, VRAM free %.2fGB", i + 1, len(batches), torch.cuda.mem_get_info()[0] / 1024**3)
+                log.info(
+                    "phase 3: batch %d/%d done, VRAM free %.2fGB",
+                    i + 1,
+                    len(batches),
+                    torch.cuda.mem_get_info()[0] / 1024**3,
+                )
                 break
             except Exception as e:
                 log.warning("phase 3: batch %d failed (%s), retrying in 10s", i + 1, e)

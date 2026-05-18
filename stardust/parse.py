@@ -61,7 +61,7 @@ def _buffer_tokens(buf: list[str]) -> int:
 
 def _extract_text(node: dict) -> str:
     t = node.get("type", "")
-    if t in ("Image", "BlockCode", "CodeFence", "ThematicBreak", "LineBreak", "EscapeSequence", "AutoLink"):
+    if t in {"Image", "BlockCode", "CodeFence", "ThematicBreak", "LineBreak", "EscapeSequence", "AutoLink"}:
         return ""
     if t == "RawText":
         return node.get("content", "")
@@ -74,25 +74,22 @@ def _md_blocks(markdown: str) -> list[tuple[str, str]]:
     blocks: list[tuple[str, str]] = []
     for node in ast.get("children") or []:
         t = node.get("type", "")
-        if t in ("Heading", "SetextHeading"):
+        if t in {"Heading", "SetextHeading"}:
             text = _extract_text(node).strip()
             if text:
                 blocks.append(("heading", text))
-        elif t in ("Paragraph", "Quote"):
-            text = _extract_text(node).strip()
-            if text:
-                blocks.append(("paragraph", text))
-        elif t in ("List", "Quote"):
+        elif t in {"Paragraph", "Quote"} or t in {"List", "Quote"}:
             text = _extract_text(node).strip()
             if text:
                 blocks.append(("paragraph", text))
         elif t == "Table":
-            for row in (node.get("children") or []):
+            for row in node.get("children") or []:
                 cells = [_extract_text(cell).strip() for cell in (row.get("children") or [])]
                 text = " | ".join(c for c in cells if c)
                 if text:
                     blocks.append(("paragraph", text))
     return blocks
+
 
 def _make_node(
     nid: int,
@@ -184,7 +181,7 @@ async def normalize_hotpotqa(record: dict[str, Any], start_id: int = 0) -> Async
     buffer: list[str] = []
     content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{doc_value} | ")
     for sentence in (s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()):
-        if _buffer_tokens(buffer + [sentence]) > content_limit and buffer:
+        if _buffer_tokens([*buffer, sentence]) > content_limit and buffer:
             async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.id, state):
                 yield item
         buffer.append(sentence)
@@ -211,7 +208,7 @@ async def normalize_qasper(record: dict[str, Any], start_id: int = 0) -> AsyncGe
     buffer: list[str] = []
     content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{doc_clean} | ")
     for para in sentences:
-        if _buffer_tokens(buffer + [para]) > content_limit and buffer:
+        if _buffer_tokens([*buffer, para]) > content_limit and buffer:
             async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.id, state):
                 yield item
         buffer.append(para)
@@ -226,8 +223,14 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
     corpus_text = "crag_open"
     corpus_clean, _ = _clean(corpus_text)
     corpus_node = _make_node(
-        state.counter, corpus_level, corpus_clean,
-        state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None,
+        state.counter,
+        corpus_level,
+        corpus_clean,
+        state.raw_pos,
+        len(corpus_text),
+        state.clean_pos,
+        len(corpus_clean),
+        None,
     )
     state.counter += 1
     state.raw_pos += len(corpus_text)
@@ -242,8 +245,14 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
     page_clean, _ = _clean(filename)
     page_value = f"{corpus_clean} | {page_clean}"
     page_node = _make_node(
-        state.counter, page_level, page_value,
-        state.raw_pos, len(filename), state.clean_pos, len(page_clean), corpus_node.id,
+        state.counter,
+        page_level,
+        page_value,
+        state.raw_pos,
+        len(filename),
+        state.clean_pos,
+        len(page_clean),
+        corpus_node.id,
     )
     state.counter += 1
     state.raw_pos += len(filename)
@@ -263,8 +272,14 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
             sec_clean, _ = _clean(text)
             current_section_value = f"{page_value} | {sec_clean}"
             sec_node = _make_node(
-                state.counter, section_level, current_section_value,
-                state.raw_pos, len(text), state.clean_pos, len(sec_clean), page_node.id,
+                state.counter,
+                section_level,
+                current_section_value,
+                state.raw_pos,
+                len(text),
+                state.clean_pos,
+                len(sec_clean),
+                page_node.id,
             )
             current_section_id = sec_node.id
             state.counter += 1
@@ -272,13 +287,13 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
             state.clean_pos += len(sec_clean)
             yield ParsedNode(node=sec_node, is_atom=False)
             content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{current_section_value} | ")
-            if _buffer_tokens(buffer + [text]) > content_limit and buffer:
+            if _buffer_tokens([*buffer, text]) > content_limit and buffer:
                 async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
                     yield item
             buffer.append(text)
         else:
             content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{current_section_value} | ")
-            if _buffer_tokens(buffer + [text]) > content_limit and buffer:
+            if _buffer_tokens([*buffer, text]) > content_limit and buffer:
                 async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
                     yield item
             buffer.append(text)

@@ -76,13 +76,12 @@ def _greedy_cluster(vecs: np.ndarray, threshold: float, surfaces: list[str] | No
             continue
         cluster = [i]
         assigned[i] = True
-        for j, dist in zip(indices[i], distances[i]):
+        for j, dist in zip(indices[i], distances[i], strict=False):
             if j == i or assigned[j]:
                 continue
-            if dist >= threshold:
-                if surfaces is None or _shares_token(surfaces[i], surfaces[j]):
-                    cluster.append(j)
-                    assigned[j] = True
+            if dist >= threshold and (surfaces is None or _shares_token(surfaces[i], surfaces[j])):
+                cluster.append(j)
+                assigned[j] = True
         clusters.append(cluster)
     return clusters
 
@@ -119,7 +118,11 @@ def _disambiguate(
     # step 3: encode unique atom texts once
     unique_atom_ids = list({atom_id for mentions in by_type.values() for _, _, atom_id, _, _ in mentions})
     unique_texts = [atom_texts.get(atom_id, "") for atom_id in unique_atom_ids]
-    log.info("before unique_vecs encode: VRAM free %.2fGB, unique_texts: %d", torch.cuda.mem_get_info()[0] / 1024**3, len(unique_texts))
+    log.info(
+        "before unique_vecs encode: VRAM free %.2fGB, unique_texts: %d",
+        torch.cuda.mem_get_info()[0] / 1024**3,
+        len(unique_texts),
+    )
     unique_vecs = _encode(embedder, unique_texts)
     atom_vec_map = {atom_id: unique_vecs[i].copy() for i, atom_id in enumerate(unique_atom_ids)}
 
@@ -148,8 +151,8 @@ def _disambiguate(
         for si, short in enumerate(unique_norms):
             if not short:
                 continue
-            pattern = re.compile(r'\b' + re.escape(short) + r'\b')
-            for long in unique_norms[si + 1:]:
+            pattern = re.compile(r"\b" + re.escape(short) + r"\b")
+            for long in unique_norms[si + 1 :]:
                 if pattern.search(long):
                     uf.union(norm_rep[short], norm_rep[long])
 
@@ -162,17 +165,17 @@ def _disambiguate(
         rep_contexts = [mentions[i][4] for i in rep_indices]
         rep_atom_ids = [mentions[i][2] for i in rep_indices]
 
-        unique_rep_contexts = list({c for c in rep_contexts})
-        context_vec_map = dict(zip(unique_rep_contexts, _encode(embedder, unique_rep_contexts)))
+        unique_rep_contexts = list(set(rep_contexts))
+        context_vec_map = dict(zip(unique_rep_contexts, _encode(embedder, unique_rep_contexts), strict=False))
         context_vecs = np.array([context_vec_map[rep_contexts[k]] for k in range(len(rep_indices))])
         atom_vecs = np.array([atom_vec_map[rep_atom_ids[k]] for k in range(len(rep_indices))])
         vecs = (atom_vecs + context_vecs) / 2
-        vecs = vecs / np.linalg.norm(vecs, axis=1, keepdims=True)
+        vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
 
         rep_surfaces = [_normalize(mentions[i][0]) for i in rep_indices]
         local_clusters = _greedy_cluster(vecs, ENTITY_MERGE_THRESHOLD, rep_surfaces)
         cluster_vecs = np.array([np.mean(vecs[cluster], axis=0) for cluster in local_clusters])
-        cluster_vecs = cluster_vecs / np.linalg.norm(cluster_vecs, axis=1, keepdims=True)
+        cluster_vecs /= np.linalg.norm(cluster_vecs, axis=1, keepdims=True)
         cluster_surfaces = [rep_surfaces[cluster[0]] for cluster in local_clusters]
         global_clusters = _greedy_cluster(cluster_vecs, GLOBAL_MERGE_THRESHOLD, cluster_surfaces)
 
