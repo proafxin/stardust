@@ -29,7 +29,6 @@ async def extract_batch(
                         ),
                     )
                     for token in doc
-                    if token.pos_ != "PRON"
                 ],
             )
             for atom_id, doc, clean_start in zip(

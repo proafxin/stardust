@@ -62,13 +62,15 @@ def collect_entity_mentions(
         for surface, ent_type, offset in _entity_spans(node.nlp_attributes):
             if not ent_type:
                 continue
-            span_tokens = [a for a in node.nlp_attributes if offset.start <= a.offset.start < offset.end]
-            if not any(t.pos_ in ("NOUN", "PROPN") for t in span_tokens):
-                continue
             window = _context_window(node.nlp_attributes, offset.start, offset.end)
             relations = _relation_triples(node.nlp_attributes, offset.start, offset.end)
             context = " ".join(filter(None, [surface, window, relations]))
             mentions.append((surface, ent_type, offset, atom_id, context))
+        for token in node.nlp_attributes:
+            if token.pos_ in ("NOUN", "PROPN", "PRON") and token.ent_iob_ == "O":
+                window = _context_window(node.nlp_attributes, token.offset.start, token.offset.end)
+                context = " ".join(filter(None, [token.text, window]))
+                mentions.append((token.text, token.pos_, token.offset, atom_id, context))
     return mentions
 
 
