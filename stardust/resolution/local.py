@@ -1,3 +1,4 @@
+from stardust.config import NUMERIC_ENTITY_TYPES
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
 
@@ -19,8 +20,8 @@ def _entity_spans(attrs: list[TokenAttributes]) -> list[tuple[str, str, SpanOffs
     return spans
 
 
-def _pronoun_spans(attrs: list[TokenAttributes]) -> list[TokenAttributes]:
-    return [a for a in attrs if a.pos_ == "PRON"]
+def _nominal_spans(attrs: list[TokenAttributes]) -> list[TokenAttributes]:
+    return [a for a in attrs if a.pos_ in {"NOUN", "PROPN", "PRON"}]
 
 
 def _relation_triples(attrs: list[TokenAttributes], entity_start: int, entity_end: int) -> str:
@@ -56,18 +57,18 @@ def collect_entity_mentions(record_id: str, index: AtomIndex) -> list[tuple[str,
     for atom_id in index.atoms:
         node = index.nodes[atom_id]
         for surface, ent_type, offset in _entity_spans(node.nlp_attributes):
-            if not ent_type:
+            if not ent_type or ent_type in NUMERIC_ENTITY_TYPES:
                 continue
             window = _context_window(node.nlp_attributes, offset.start, offset.end)
             context = " ".join(filter(None, [surface, window]))
             mentions.append((surface, ent_type, offset, atom_id, context))
         if node.disambiguation:
             for resolution in node.disambiguation.pronoun_map:
-                if not resolution.local_entity:
+                if not resolution.referent:
                     continue
                 window = _context_window(node.nlp_attributes, resolution.offset.start, resolution.offset.end)
-                context = " ".join(filter(None, [resolution.local_entity, window]))
-                mentions.append((resolution.local_entity, "PRON", resolution.offset, atom_id, context))
+                context = " ".join(filter(None, [resolution.referent, window]))
+                mentions.append((resolution.referent, "COREF", resolution.offset, atom_id, context))
     return mentions
 
 
@@ -81,7 +82,7 @@ def attach_pronoun_resolutions(index: AtomIndex, pronoun_map: list[dict]) -> Non
         matched = next(
             (
                 a
-                for a in _pronoun_spans(node.nlp_attributes)
+                for a in _nominal_spans(node.nlp_attributes)
                 if len(offset_val) == 2 and a.offset.start == offset_val[0]
             ),
             None,
@@ -93,26 +94,23 @@ def attach_pronoun_resolutions(index: AtomIndex, pronoun_map: list[dict]) -> Non
         node.disambiguation.pronoun_map.append(
             PronounResolution(
                 offset=matched.offset,
-                pronoun=entry.get("pronoun", matched.text),
-                local_entity=entry.get("local_entity", ""),
+                token=entry.get("token", matched.text),
+                referent=entry.get("referent", ""),
                 confidence=float(entry.get("confidence", 1.0)),
             )
         )
 
 
 def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes]) -> dict | None:
-    pronouns = _pronoun_spans(attrs)
-    if not pronouns:
+    nominals = _nominal_spans(attrs)
+    if not nominals:
         return None
-    entities = _entity_spans(attrs)
+    entities = [(t, et, o) for t, et, o in _entity_spans(attrs) if et not in NUMERIC_ENTITY_TYPES]
     return {
         "atom_id": atom_id,
         "text": value,
         "entities": [{"text": t, "type": et, "offset": [o.start, o.end]} for t, et, o in entities],
-        "pronouns": [
-            {"text": p.text, "offset": [p.offset.start, p.offset.end], "dep": p.dep_, "morph": p.morph}
-            for p in pronouns
-        ],
+        "tokens": [{"text": t.text, "pos": t.pos_, "offset": [t.offset.start, t.offset.end]} for t in nominals],
     }
 
 
@@ -121,18 +119,17 @@ def build_batch_prompt(atom_data: list[dict]) -> str:
         return ""
     lines = []
     for a in atom_data:
-        entities = ", ".join(f"{e['text']}({e['type']})" for e in a["entities"])
-        pronouns = ", ".join(f"{p['text']}@{p['offset'][0]}" for p in a["pronouns"])
-        lines.append(f"[{a['atom_id']}] {a['text']} | entities: {entities} | pronouns: {pronouns}")
+        tokens = ", ".join(f"{t['text']}({t['pos']})@{t['offset'][0]}" for t in a["tokens"])
+        lines.append(f"[{a['atom_id']}] {a['text']} | tokens: {tokens}")
     examples = (
-        "[12] Sarah joined the firm in 2005. She became partner within three years. | entities: Sarah(PERSON), firm(ORG) | pronouns: She@36\n"
-        '=> [{"atom_id":12,"offset":[36,39],"pronoun":"She","local_entity":"Sarah","confidence":0.99}]\n'
-        "[47] The treaty was signed by France and Germany. It came into force in 1920. | entities: France(GPE), Germany(GPE) | pronouns: It@50\n"
-        '=> [{"atom_id":47,"offset":[50,52],"pronoun":"It","local_entity":"treaty","confidence":0.85}]\n'
-        "[83] NASA launched the probe. Engineers monitored its trajectory closely. | entities: NASA(ORG), probe(PRODUCT) | pronouns: its@46\n"
-        '=> [{"atom_id":83,"offset":[46,49],"pronoun":"its","local_entity":"probe","confidence":0.97}]'
+        "[12] Sarah joined the firm in 2005. She became partner within three years. | tokens: Sarah(PROPN)@0, firm(NOUN)@15, She(PRON)@36, partner(NOUN)@49\n"
+        '=> [{"atom_id":12,"offset":[36,39],"token":"She","referent":"Sarah","confidence":0.99}]\n'
+        "[47] The treaty was signed by France and Germany. It came into force in 1920. | tokens: treaty(NOUN)@4, France(PROPN)@25, Germany(PROPN)@35, It(PRON)@50\n"
+        '=> [{"atom_id":47,"offset":[50,52],"token":"It","referent":"treaty","confidence":0.85}]\n'
+        "[83] NASA launched the probe. Engineers monitored its trajectory closely. | tokens: NASA(PROPN)@0, probe(NOUN)@18, Engineers(NOUN)@28, its(PRON)@46\n"
+        '=> [{"atom_id":83,"offset":[46,49],"token":"its","referent":"probe","confidence":0.97}]'
     )
     return (
-        "Resolve pronoun coreference. For each pronoun, output one JSON object: atom_id, offset([start,end]), pronoun, local_entity, confidence.\n\n"
+        "Resolve coreference for all NOUN, PROPN and PRON tokens. For each token that refers to another entity in the text, output one JSON object: atom_id, offset([start,end]), token, referent, confidence. Only output resolutions where a clear referent exists.\n\n"
         f"{examples}\n\n" + "\n".join(lines) + "\n=>"
     )

@@ -80,8 +80,7 @@ def _extract_text(node: dict) -> str:
         return " ".join(filter(None, [text, target]))
     if t == "RawText":
         content = html.unescape(node.get("content", ""))
-        content = re.sub(r'[\[\]!*_`#>]', '', content)
-        return content
+        return re.sub(r"[\[\]!*_`#>]", "", content)
     return " ".join(_extract_text(c) for c in (node.get("children") or []))
 
 
@@ -110,16 +109,16 @@ def _md_blocks(markdown: str) -> list[tuple[str, str]]:
 
 def _clean_filename(filename: str) -> str:
     # strip leading hash prefix: "<hex>-https%3A%2F%2F..."
-    s = re.sub(r'^[0-9a-f]{32}-', '', filename)
+    s = re.sub(r"^[0-9a-f]{32}-", "", filename)
     s = unquote(s)
     # extract just the path portion after the domain
-    m = re.search(r'https?://[^/]+(/.*)', s)
+    m = re.search(r"https?://[^/]+(/.*)", s)
     if m:
         s = m.group(1)
     # replace slashes, dashes, underscores with spaces and clean up
-    s = re.sub(r'[/_-]+', ' ', s)
-    s = re.sub(r'\.[a-z]{2,4}$', '', s)  # strip file extension
-    return re.sub(r'\s+', ' ', s).strip()
+    s = re.sub(r"[/_-]+", " ", s)
+    s = re.sub(r"\.[a-z]{2,4}$", "", s)  # strip file extension
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _make_node(

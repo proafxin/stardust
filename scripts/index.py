@@ -31,7 +31,7 @@ from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_nlp
 from stardust.resolution.global_resolution import merge_across_records
 from stardust.resolution.local import (
-    _pronoun_spans,
+    _nominal_spans,
     build_batch_prompt,
     build_pronoun_prompt,
     collect_entity_mentions,
@@ -379,7 +379,7 @@ async def phase_llm() -> None:
                                 continue
                             abs_start = clean_start + offset_val[0]
                             matched = next(
-                                (a for a in _pronoun_spans(attrs) if a.offset.start == abs_start),
+                                (a for a in _nominal_spans(attrs) if a.offset.start == abs_start),
                                 None,
                             )
                             if matched is None:
@@ -387,8 +387,8 @@ async def phase_llm() -> None:
                             disambiguation["pronoun_map"].append(
                                 {
                                     "offset": matched.offset.model_dump(),
-                                    "pronoun": entry.get("pronoun", matched.text),
-                                    "local_entity": entry.get("local_entity", ""),
+                                    "token": entry.get("token", matched.text),
+                                    "referent": entry.get("referent", ""),
                                     "confidence": float(entry.get("confidence", 1.0)),
                                 }
                             )
@@ -455,13 +455,16 @@ async def phase_disambiguation() -> None:
     log.info("before merge_across_records: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel.id, AtomModel.value, AtomModel.value_hash))
+        result = await session.execute(
+            select(AtomModel.id, AtomModel.value, AtomModel.value_hash, AtomModel.disambiguation)
+        )
         rows = result.fetchall()
+
     def _strip_noise(value: str) -> str:
-        s = re.sub(r'\b[0-9a-f]{32}\b', '', value)
-        s = re.sub(r'https?%3A%2F%2F\S+', '', s)
-        s = re.sub(r'https?://\S+', '', s)
-        return re.sub(r'\s+', ' ', s).strip()
+        s = re.sub(r"\b[0-9a-f]{32}\b", "", value)
+        s = re.sub(r"https?%3A%2F%2F\S+", "", s)
+        s = re.sub(r"https?://\S+", "", s)
+        return re.sub(r"\s+", " ", s).strip()
 
     atom_texts = {r.id: _strip_noise(r.value.split(" | ", 1)[-1] if " | " in r.value else r.value) for r in rows}
 
@@ -476,12 +479,28 @@ async def phase_disambiguation() -> None:
 
     def _content(value: str) -> str:
         raw = value.split(" | ", 1)[-1] if " | " in value else value
-        raw = re.sub(r'\b[0-9a-f]{32}\b', '', raw)
-        raw = re.sub(r'https?%3A%2F%2F\S+', '', raw)
-        raw = re.sub(r'https?://\S+', '', raw)
-        return re.sub(r'\s+', ' ', raw).strip()
+        raw = re.sub(r"\b[0-9a-f]{32}\b", "", raw)
+        raw = re.sub(r"https?%3A%2F%2F\S+", "", raw)
+        raw = re.sub(r"https?://\S+", "", raw)
+        return re.sub(r"\s+", " ", raw).strip()
 
-    texts = [_content(r.value) + (" " + " ".join(atom_aliases[r.id]) if r.id in atom_aliases else "") for r in rows]
+    coref_map: dict[int, list[str]] = {}
+    for r in rows:
+        if not r.disambiguation:
+            continue
+        referents = [e["referent"] for e in r.disambiguation.get("pronoun_map", []) if e.get("referent")]
+        if referents:
+            coref_map[r.id] = referents
+
+    def _enrich(r) -> str:
+        parts = [_content(r.value)]
+        if r.id in atom_aliases:
+            parts.append(" ".join(atom_aliases[r.id]))
+        if r.id in coref_map:
+            parts.append(" ".join(coref_map[r.id]))
+        return " ".join(parts)
+
+    texts = [_enrich(r) for r in rows]
     total = len(rows)
 
     existing_hashes = {r.id: r.value_hash for r in rows}

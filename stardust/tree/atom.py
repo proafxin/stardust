@@ -25,8 +25,8 @@ class TokenAttributes(BaseModel):
 
 class PronounResolution(BaseModel):
     offset: SpanOffset
-    pronoun: str
-    local_entity: str
+    token: str
+    referent: str
     confidence: float
 
 
