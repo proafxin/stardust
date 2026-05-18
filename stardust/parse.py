@@ -1,3 +1,4 @@
+import html
 import json
 import re
 import unicodedata
@@ -37,10 +38,13 @@ def _clean(raw: str) -> tuple[str, OffsetMap]:
     offset_map = OffsetMap()
     result: list[str] = []
     src_pos = dst_pos = 0
+    raw = html.unescape(raw)
     for segment in re.split(r"(\n+)", unicodedata.normalize("NFKC", raw)):
         if not segment:
             continue
         cleaned = re.sub(r"[ \t]+", " ", segment).strip(" \t")
+        cleaned = re.sub(r"\.{3,}", "...", cleaned)
+        cleaned = re.sub(r"-{3,}", "—", cleaned)
         if not cleaned:
             src_pos += len(segment)
             continue
@@ -57,15 +61,27 @@ def _token_count(text: str) -> int:
 
 
 def _buffer_tokens(buf: list[str]) -> int:
-    return _token_count(" ".join(buf)) if buf else 0
+    if not buf:
+        return 0
+    combined = " ".join(buf)
+    cleaned, _ = _clean(combined)
+    return _token_count(cleaned)
 
 
 def _extract_text(node: dict) -> str:
     t = node.get("type", "")
-    if t in {"Image", "BlockCode", "CodeFence", "ThematicBreak", "LineBreak", "EscapeSequence", "AutoLink"}:
+    if t in {"BlockCode", "CodeFence", "ThematicBreak", "LineBreak", "EscapeSequence", "AutoLink", "InlineCode"}:
         return ""
+    if t == "Image":
+        return " ".join(_extract_text(c) for c in (node.get("children") or []))
+    if t == "Link":
+        text = " ".join(_extract_text(c) for c in (node.get("children") or []))
+        target = node.get("target", "")
+        return " ".join(filter(None, [text, target]))
     if t == "RawText":
-        return node.get("content", "")
+        content = html.unescape(node.get("content", ""))
+        content = re.sub(r'[\[\]!*_`#>]', '', content)
+        return content
     return " ".join(_extract_text(c) for c in (node.get("children") or []))
 
 
