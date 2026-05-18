@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
+from urllib.parse import unquote
 
 import mistletoe
 from mistletoe.ast_renderer import AstRenderer
@@ -91,7 +92,20 @@ def _md_blocks(markdown: str) -> list[tuple[str, str]]:
     return blocks
 
 
-def _make_node(
+def _clean_filename(filename: str) -> str:
+    # strip leading hash prefix: "<hex>-https%3A%2F%2F..."
+    s = re.sub(r'^[0-9a-f]{32}-', '', filename)
+    s = unquote(s)
+    # extract just the path portion after the domain
+    m = re.search(r'https?://[^/]+(/.*)', s)
+    if m:
+        s = m.group(1)
+    # replace slashes, dashes, underscores with spaces and clean up
+    s = re.sub(r'[/_-]+', ' ', s)
+    s = re.sub(r'\.[a-z]{2,4}$', '', s)  # strip file extension
+    return re.sub(r'\s+', ' ', s).strip()
+
+
     nid: int,
     node_type: str,
     value: str,
@@ -242,7 +256,7 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
     if not content.strip():
         return
 
-    page_clean, _ = _clean(filename)
+    page_clean, _ = _clean(_clean_filename(filename))
     page_value = f"{corpus_clean} | {page_clean}"
     page_node = _make_node(
         state.counter,

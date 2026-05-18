@@ -456,7 +456,13 @@ async def phase_disambiguation() -> None:
     async with SessionLocal() as session:
         result = await session.execute(select(AtomModel.id, AtomModel.value, AtomModel.value_hash))
         rows = result.fetchall()
-    atom_texts = {r.id: r.value for r in rows}
+    def _strip_noise(value: str) -> str:
+        s = re.sub(r'\b[0-9a-f]{32}\b', '', value)
+        s = re.sub(r'https?%3A%2F%2F\S+', '', s)
+        s = re.sub(r'https?://\S+', '', s)
+        return re.sub(r'\s+', ' ', s).strip()
+
+    atom_texts = {r.id: _strip_noise(r.value.split(" | ", 1)[-1] if " | " in r.value else r.value) for r in rows}
 
     global_entities = await merge_across_records(per_record, atom_texts)
     log.info("phase 4: %d canonical entities", len(global_entities))
@@ -467,7 +473,15 @@ async def phase_disambiguation() -> None:
         for _, _, atom_id, _ in entity.mentions:
             atom_aliases.setdefault(atom_id, []).extend(entity.aliases)
 
-    texts = [r.value + (" " + " ".join(atom_aliases[r.id]) if r.id in atom_aliases else "") for r in rows]
+def _content(value: str) -> str:
+        raw = value.split(" | ", 1)[-1] if " | " in value else value
+        # strip uuid/hash tokens and url-encoded strings
+        raw = re.sub(r'\b[0-9a-f]{32}\b', '', raw)
+        raw = re.sub(r'https?%3A%2F%2F\S+', '', raw)
+        raw = re.sub(r'https?://\S+', '', raw)
+        return re.sub(r'\s+', ' ', raw).strip()
+
+    texts = [_content(r.value) + (" " + " ".join(atom_aliases[r.id]) if r.id in atom_aliases else "") for r in rows]
     total = len(rows)
 
     existing_hashes = {r.id: r.value_hash for r in rows}
