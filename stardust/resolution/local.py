@@ -66,11 +66,13 @@ def collect_entity_mentions(
             relations = _relation_triples(node.nlp_attributes, offset.start, offset.end)
             context = " ".join(filter(None, [surface, window, relations]))
             mentions.append((surface, ent_type, offset, atom_id, context))
-        for token in node.nlp_attributes:
-            if token.pos_ in ("NOUN", "PROPN", "PRON") and token.ent_iob_ == "O":
-                window = _context_window(node.nlp_attributes, token.offset.start, token.offset.end)
-                context = " ".join(filter(None, [token.text, window]))
-                mentions.append((token.text, token.pos_, token.offset, atom_id, context))
+        if node.disambiguation:
+            for resolution in node.disambiguation.pronoun_map:
+                if not resolution.local_entity:
+                    continue
+                window = _context_window(node.nlp_attributes, resolution.offset.start, resolution.offset.end)
+                context = " ".join(filter(None, [resolution.local_entity, window]))
+                mentions.append((resolution.local_entity, "PRON", resolution.offset, atom_id, context))
     return mentions
 
 

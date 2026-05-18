@@ -2,10 +2,11 @@ import asyncio
 import logging
 from collections import defaultdict
 
+import faiss
 import numpy as np
 import torch
 
-from stardust.config import EMBEDDING_INTERNAL_BATCH_SIZE, ENTITY_MERGE_THRESHOLD, GLOBAL_MERGE_THRESHOLD
+from stardust.config import EMBEDDING_DIM, EMBEDDING_INTERNAL_BATCH_SIZE, ENTITY_MERGE_THRESHOLD, GLOBAL_MERGE_THRESHOLD
 from stardust.registry import embedder as load_embedder
 from stardust.tree.atom import SpanOffset
 
@@ -39,15 +40,25 @@ def _encode(embedder, texts: list[str]) -> np.ndarray:
 
 
 def _greedy_cluster(vecs: np.ndarray, threshold: float) -> list[list[int]]:
+    if len(vecs) == 0:
+        return []
+    vecs = vecs.astype(np.float32)
+    index = faiss.IndexFlatIP(vecs.shape[1])
+    index.add(vecs)
     assigned = [False] * len(vecs)
     clusters: list[list[int]] = []
+    # search k nearest neighbors for each vector
+    k = min(64, len(vecs))
+    distances, indices = index.search(vecs, k)
     for i in range(len(vecs)):
         if assigned[i]:
             continue
         cluster = [i]
         assigned[i] = True
-        for j in range(i + 1, len(vecs)):
-            if not assigned[j] and float(np.dot(vecs[i], vecs[j])) >= threshold:
+        for j, dist in zip(indices[i], distances[i]):
+            if j == i or assigned[j]:
+                continue
+            if dist >= threshold:
                 cluster.append(j)
                 assigned[j] = True
         clusters.append(cluster)

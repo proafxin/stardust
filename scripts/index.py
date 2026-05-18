@@ -241,6 +241,7 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]], keep_alive: str
 
 async def phase_llm() -> None:
     log.info("phase 3: llm pronoun resolution")
+    log.info("phase 3: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     async with SessionLocal() as session:
         result = await session.execute(
@@ -305,7 +306,7 @@ async def phase_llm() -> None:
                             update(AtomModel).where(AtomModel.id == atom_id).values(disambiguation=disambiguation)
                         )
                     await session.commit()
-                log.info("phase 3: batch %d/%d done", i + 1, len(batches))
+                log.info("phase 3: batch %d/%d done, VRAM free %.2fGB", i + 1, len(batches), torch.cuda.mem_get_info()[0] / 1024**3)
                 break
             except Exception as e:
                 log.warning("phase 3: batch %d failed (%s), retrying in 10s", i + 1, e)
