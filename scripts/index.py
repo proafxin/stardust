@@ -198,6 +198,7 @@ async def phase_normalize() -> None:
 
 async def phase_nlp() -> None:
     log.info("phase 2: nlp extraction")
+    log.info("phase 2: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     done = 0
     async with SessionLocal() as read_session:
