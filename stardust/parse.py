@@ -6,6 +6,7 @@ from typing import Any
 
 from stardust.config import ATOM_TOKEN_LIMIT
 from stardust.index import OffsetMap
+from stardust.registry import embedder
 from stardust.tree.atom import Modality, Node, SpanOffset
 
 HOTPOTQA_LEVELS = ["corpus", "document", "sentence"]
@@ -45,7 +46,8 @@ def _clean(raw: str) -> tuple[str, OffsetMap]:
 
 
 def _token_count(text: str) -> int:
-    return len(text.split())
+    return len(embedder().tokenizer.encode(text, add_special_tokens=False))
+
 
 
 def _make_node(
@@ -137,9 +139,11 @@ async def normalize_hotpotqa(record: dict[str, Any], start_id: int = 0) -> Async
 
     buffer: list[str] = []
     buffer_tokens = 0
+    prefix_tokens = _token_count(f"{doc_value} | ")
+    content_limit = ATOM_TOKEN_LIMIT - prefix_tokens
     for sentence in (s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()):
         tokens = _token_count(sentence)
-        if buffer_tokens + tokens > ATOM_TOKEN_LIMIT and buffer:
+        if buffer_tokens + tokens > content_limit and buffer:
             async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.id, state):
                 yield item
             buffer_tokens = 0
@@ -167,9 +171,11 @@ async def normalize_qasper(record: dict[str, Any], start_id: int = 0) -> AsyncGe
 
     buffer: list[str] = []
     buffer_tokens = 0
+    prefix_tokens = _token_count(f"{doc_clean} | ")
+    content_limit = ATOM_TOKEN_LIMIT - prefix_tokens
     for para in sentences:
         tokens = _token_count(para)
-        if buffer_tokens + tokens > ATOM_TOKEN_LIMIT and buffer:
+        if buffer_tokens + tokens > content_limit and buffer:
             async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.id, state):
                 yield item
             buffer_tokens = 0
@@ -247,22 +253,21 @@ async def _normalize_crag_search_results(
     yield ParsedNode(node=page_node, is_atom=False)
 
     clean_snippet, _ = _clean(snippet)
-    atom_value = f"{page_value} | {clean_snippet}"
-    atom_node = _make_node(
-        state.counter,
-        atom_level,
-        atom_value,
-        state.raw_pos,
-        len(snippet),
-        state.clean_pos,
-        len(clean_snippet),
-        page_node.id,
-        True,
-    )
-    state.counter += 1
-    state.raw_pos += len(snippet)
-    state.clean_pos += len(clean_snippet)
-    yield ParsedNode(node=atom_node, is_atom=True)
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", clean_snippet) if s.strip()]
+    buffer: list[str] = []
+    buffer_tokens = 0
+    prefix_tokens = _token_count(f"{page_value} | ")
+    content_limit = ATOM_TOKEN_LIMIT - prefix_tokens
+    for sentence in sentences:
+        tokens = _token_count(sentence)
+        if buffer_tokens + tokens > content_limit and buffer:
+            async for item in _flush_buffer(buffer, atom_level, page_value, page_node.id, state):
+                yield item
+            buffer_tokens = 0
+        buffer.append(sentence)
+        buffer_tokens += tokens
+    async for item in _flush_buffer(buffer, atom_level, page_value, page_node.id, state):
+        yield item
 
 
 async def _normalize_crag_markdown(
@@ -319,7 +324,9 @@ async def _normalize_crag_markdown(
             yield ParsedNode(node=sec_node, is_atom=False)
         else:
             tokens = _token_count(stripped)
-            if buffer_tokens + tokens > ATOM_TOKEN_LIMIT and buffer:
+            section_prefix_tokens = _token_count(f"{current_section_value} | ")
+            content_limit = ATOM_TOKEN_LIMIT - section_prefix_tokens
+            if buffer_tokens + tokens > content_limit and buffer:
                 async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
                     yield item
                 buffer_tokens = 0

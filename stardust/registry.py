@@ -23,6 +23,7 @@ def unload_nlp() -> None:
 @cache
 def embedder() -> SentenceTransformer:
     model = SentenceTransformer(EMBEDDING_MODEL, device="cuda", model_kwargs={"torch_dtype": torch.bfloat16})
+    model.max_seq_length = 512
     model.eval()
     return model
 

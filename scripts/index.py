@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow.parquet as pq
+import torch
 from redis.asyncio import Redis
 from sqlalchemy import select, text, update
 
@@ -351,6 +352,8 @@ async def phase_disambiguation() -> None:
 
     per_record = list(await asyncio.gather(*[_process_record_disambiguation(record_id) for record_id in record_ids]))
 
+    log.info("before merge_across_records: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+
     async with SessionLocal() as session:
         result = await session.execute(select(AtomModel.id, AtomModel.value))
         rows = result.fetchall()
@@ -369,25 +372,24 @@ async def phase_disambiguation() -> None:
     texts = [r.value + (" " + " ".join(atom_aliases[r.id]) if r.id in atom_aliases else "") for r in rows]
     total = len(atom_ids)
 
-    for batch_start in range(0, total, EMBEDDING_BATCH_SIZE):
-        batch_ids = atom_ids[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
-        batch_texts = texts[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
-        vecs = await asyncio.to_thread(
-            load_embedder().encode,
-            batch_texts,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
-        )
-        async with SessionLocal() as session:
-            for atom_id, vec, text_val in zip(batch_ids, vecs, batch_texts, strict=False):
-                await session.execute(
-                    update(AtomModel)
-                    .where(AtomModel.id == atom_id)
-                    .values(embedding=vec.tolist(), value=text_val)
-                )
-            await session.commit()
-        log.info("phase 4: embedded %d/%d", min(batch_start + EMBEDDING_BATCH_SIZE, total), total)
+    # Let SentenceTransformer handle batching internally with batch_size parameter
+    vecs = load_embedder().encode(
+        texts,
+        batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    
+    async with SessionLocal() as session:
+        for atom_id, vec, text_val in zip(atom_ids, vecs, texts, strict=False):
+            await session.execute(
+                update(AtomModel)
+                .where(AtomModel.id == atom_id)
+                .values(embedding=vec.tolist(), value=text_val)
+            )
+        await session.commit()
+    
+    log.info("phase 4: embedded %d atoms", total)
 
     async with SessionLocal() as session:
         await insert_canonical_entities(global_entities, "global", session)
@@ -410,6 +412,8 @@ async def phase_disambiguation() -> None:
 
 
 async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: bool = False) -> None:
+    log.info("loading embedding model")
+    load_embedder()
     if not skip_normalize:
         await phase_normalize()
     if not skip_nlp:
@@ -420,8 +424,6 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
         unload_nlp()
     if not skip_llm:
         await phase_llm()
-    log.info("loading embedding model")
-    load_embedder()
     await phase_disambiguation()
 
 
