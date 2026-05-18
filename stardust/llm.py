@@ -18,7 +18,7 @@ async def ollama_complete(prompt: str, max_tokens: int = 4096, keep_alive: str =
             {"role": "user", "content": prompt},
         ],
         "stream": False,
-        "format": {"type": "array", "items": {"type": "object"}},
+        "format": {"type": "object", "additionalProperties": {"type": "integer"}},
         "options": {"num_predict": max_tokens, "num_ctx": 30000},
         "think": False,
         "keep_alive": keep_alive,

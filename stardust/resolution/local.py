@@ -105,12 +105,10 @@ def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes])
     nominals = _nominal_spans(attrs)
     if not nominals:
         return None
-    entities = [(t, et, o) for t, et, o in _entity_spans(attrs) if et not in NUMERIC_ENTITY_TYPES]
     return {
         "atom_id": atom_id,
         "text": value,
-        "entities": [{"text": t, "type": et, "offset": [o.start, o.end]} for t, et, o in entities],
-        "tokens": [{"text": t.text, "pos": t.pos_, "offset": [t.offset.start, t.offset.end]} for t in nominals],
+        "nominals": nominals,
     }
 
 
@@ -118,18 +116,18 @@ def build_batch_prompt(atom_data: list[dict]) -> str:
     if not atom_data:
         return ""
     lines = []
+    token_counter = 0
     for a in atom_data:
-        tokens = ", ".join(f"{t['text']}({t['pos']})@{t['offset'][0]}" for t in a["tokens"])
+        tokens = ", ".join(f"{token_counter + i}:{t.text}" for i, t in enumerate(a["nominals"]))
+        token_counter += len(a["nominals"])
         lines.append(f"[{a['atom_id']}] {a['text']} | tokens: {tokens}")
     examples = (
-        "[12] Sarah joined the firm in 2005. She became partner within three years. | tokens: Sarah(PROPN)@0, firm(NOUN)@15, She(PRON)@36, partner(NOUN)@49\n"
-        '=> [{"atom_id":12,"offset":[36,39],"token":"She","referent":"Sarah","confidence":0.99}]\n'
-        "[47] The treaty was signed by France and Germany. It came into force in 1920. | tokens: treaty(NOUN)@4, France(PROPN)@25, Germany(PROPN)@35, It(PRON)@50\n"
-        '=> [{"atom_id":47,"offset":[50,52],"token":"It","referent":"treaty","confidence":0.85}]\n'
-        "[83] NASA launched the probe. Engineers monitored its trajectory closely. | tokens: NASA(PROPN)@0, probe(NOUN)@18, Engineers(NOUN)@28, its(PRON)@46\n"
-        '=> [{"atom_id":83,"offset":[46,49],"token":"its","referent":"probe","confidence":0.97}]'
+        "[12] Sarah joined the firm. She became partner. | tokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
+        '=> {"2":0,"3":1}\n'
+        "[47] The treaty was signed by France. It came into force. [48] The agreement changed Europe. | tokens: 0:treaty, 1:France, 2:It, 3:agreement, 4:Europe\n"
+        '=> {"2":0,"3":0}'
     )
     return (
-        "Resolve coreference for all NOUN, PROPN and PRON tokens. For each token that refers to another entity in the text, output one JSON object: atom_id, offset([start,end]), token, referent, confidence. Only output resolutions where a clear referent exists.\n\n"
+        "Resolve coreference across all atoms. Output a single JSON object mapping token_id to referent_token_id. Only include tokens where a clear referent exists.\n\n"
         f"{examples}\n\n" + "\n".join(lines) + "\n=>"
     )

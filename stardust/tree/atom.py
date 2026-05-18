@@ -27,7 +27,6 @@ class PronounResolution(BaseModel):
     offset: SpanOffset
     token: str
     referent: str
-    confidence: float
 
 
 class DisambiguationMetadata(BaseModel):

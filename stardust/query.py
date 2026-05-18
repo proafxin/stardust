@@ -68,9 +68,7 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
 async def insert_canonical_entities(entities: list[CanonicalEntity], record_id: str, session: AsyncSession) -> None:
     for entity in entities:
         ce = CanonicalEntityModel(
-            canonical_name=entity.canonical_name,
-            entity_type=entity.entity_type,
-            aliases=entity.aliases,
+            canonical_name=entity.canonical_name, entity_type=entity.entity_type, aliases=entity.aliases
         )
         session.add(ce)
         await session.flush()

@@ -304,10 +304,10 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]], keep_alive: str
     prompt = build_batch_prompt(atom_data)
     raw = await ollama_complete(prompt, max_tokens=max(500, len(atom_data) * 50), keep_alive=keep_alive)
     try:
-        start, end = raw.find("["), raw.rfind("]") + 1
-        return json.loads(raw[start:end]) if start != -1 and end > 0 else []
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        return json.loads(raw[start:end]) if start != -1 and end > 0 else {}
     except json.JSONDecodeError:
-        return []
+        return {}
 
 
 async def phase_llm() -> None:
@@ -359,41 +359,40 @@ async def phase_llm() -> None:
         batches.append(current)
 
     log.info("phase 3: %d batches", len(batches))
-    clean_start_map = {r.id: r.clean_offset["start"] for r in rows}
 
     for i, batch in enumerate(batches):
         keep_alive = "0" if i == len(batches) - 1 else "5m"
         while True:
             try:
                 pronoun_map = await _process_llm_batch(batch, keep_alive)
+                global_tokens: dict[int, tuple[int, TokenAttributes]] = {}
+                token_counter = 0
+                for atom_id, _value, nlp_attrs in batch:
+                    attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
+                    for nominal in _nominal_spans(attrs):
+                        global_tokens[token_counter] = (atom_id, nominal)
+                        token_counter += 1
                 async with SessionLocal() as session:
-                    for atom_id, _value, nlp_attrs in batch:
-                        disambiguation = {"pronoun_map": []}
-                        attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
-                        clean_start = clean_start_map.get(atom_id, 0)
-                        for entry in pronoun_map:
-                            if entry.get("atom_id") != atom_id:
-                                continue
-                            offset_val = entry.get("offset", [])
-                            if len(offset_val) != 2:
-                                continue
-                            abs_start = clean_start + offset_val[0]
-                            matched = next(
-                                (a for a in _nominal_spans(attrs) if a.offset.start == abs_start),
-                                None,
-                            )
-                            if matched is None:
-                                continue
-                            disambiguation["pronoun_map"].append(
-                                {
-                                    "offset": matched.offset.model_dump(),
-                                    "token": entry.get("token", matched.text),
-                                    "referent": entry.get("referent", ""),
-                                    "confidence": float(entry.get("confidence", 1.0)),
-                                }
-                            )
+                    atom_disambig: dict[int, list] = {atom_id: [] for atom_id, _, _ in batch}
+                    for tid_str, rid in pronoun_map.items():
+                        tid = int(tid_str)
+                        if tid not in global_tokens or rid not in global_tokens:
+                            continue
+                        atom_id, matched = global_tokens[tid]
+                        _, referent_token = global_tokens[rid]
+                        atom_disambig[atom_id].append(
+                            {
+                                "offset": matched.offset.model_dump(),
+                                "token": matched.text,
+                                "referent": referent_token.text,
+                                "confidence": 1.0,
+                            }
+                        )
+                    for atom_id, _value, _ in batch:
                         await session.execute(
-                            update(AtomModel).where(AtomModel.id == atom_id).values(disambiguation=disambiguation)
+                            update(AtomModel)
+                            .where(AtomModel.id == atom_id)
+                            .values(disambiguation={"pronoun_map": atom_disambig[atom_id]})
                         )
                     await session.commit()
                 log.info(
