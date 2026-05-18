@@ -420,9 +420,11 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
         load_nlp()
         await phase_nlp()
         unload_nlp()
+    torch.cuda.empty_cache()
     load_embedder()
     if not skip_llm:
         await phase_llm()
+    torch.cuda.empty_cache()
     await phase_disambiguation()
 
 
