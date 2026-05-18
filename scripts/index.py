@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -358,7 +359,7 @@ async def phase_disambiguation() -> None:
     log.info("before merge_across_records: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel.id, AtomModel.value))
+        result = await session.execute(select(AtomModel.id, AtomModel.value, AtomModel.value_hash))
         rows = result.fetchall()
     atom_texts = {r.id: r.value for r in rows}
 
@@ -371,28 +372,32 @@ async def phase_disambiguation() -> None:
         for _, _, atom_id, _ in entity.mentions:
             atom_aliases.setdefault(atom_id, []).extend(entity.aliases)
 
-    atom_ids = [r.id for r in rows]
     texts = [r.value + (" " + " ".join(atom_aliases[r.id]) if r.id in atom_aliases else "") for r in rows]
-    total = len(atom_ids)
+    total = len(rows)
 
-    # Let SentenceTransformer handle batching internally with batch_size parameter
-    vecs = load_embedder().encode(
-        texts,
-        batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-    )
-    
-    async with SessionLocal() as session:
-        for atom_id, vec, text_val in zip(atom_ids, vecs, texts, strict=False):
-            await session.execute(
-                update(AtomModel)
-                .where(AtomModel.id == atom_id)
-                .values(embedding=vec.tolist(), value=text_val)
-            )
-        await session.commit()
-    
-    log.info("phase 4: embedded %d atoms", total)
+    existing_hashes = {r.id: r.value_hash for r in rows}
+    new_hashes = {r.id: hashlib.sha256(texts[i].encode()).hexdigest() for i, r in enumerate(rows)}
+    stale = [i for i, r in enumerate(rows) if new_hashes[r.id] != existing_hashes.get(r.id)]
+
+    if stale:
+        stale_texts = [texts[i] for i in stale]
+        stale_vecs = load_embedder().encode(
+            stale_texts,
+            batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        async with SessionLocal() as session:
+            for idx, vec in zip(stale, stale_vecs, strict=False):
+                r = rows[idx]
+                await session.execute(
+                    update(AtomModel)
+                    .where(AtomModel.id == r.id)
+                    .values(embedding=vec.tolist(), value=texts[idx], value_hash=new_hashes[r.id])
+                )
+            await session.commit()
+
+    log.info("phase 4: embedded %d/%d atoms (skipped %d)", len(stale), total, total - len(stale))
 
     async with SessionLocal() as session:
         await insert_canonical_entities(global_entities, "global", session)

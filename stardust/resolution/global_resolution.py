@@ -83,7 +83,7 @@ def _disambiguate(
     for surface, ent_type, offset, atom_id, record_id, context in all_mentions:
         by_type[type_to_canonical[ent_type]].append((surface, offset, atom_id, record_id, context))
 
-    # step 3: encode unique atom texts once, then encode context strings per type
+    # step 3: encode unique atom texts once
     unique_atom_ids = list({atom_id for mentions in by_type.values() for _, _, atom_id, _, _ in mentions})
     unique_texts = [atom_texts.get(atom_id, "") for atom_id in unique_atom_ids]
     log.info("before unique_vecs encode: VRAM free %.2fGB, unique_texts: %d", torch.cuda.mem_get_info()[0] / 1024**3, len(unique_texts))
@@ -92,8 +92,9 @@ def _disambiguate(
 
     global_entities: list[CanonicalEntity] = []
     for canonical_type, mentions in by_type.items():
-        context_texts = [context for _, _, _, _, context in mentions]
-        context_vecs = _encode(embedder, context_texts)
+        unique_contexts = list({context for _, _, _, _, context in mentions})
+        context_vec_map = dict(zip(unique_contexts, _encode(embedder, unique_contexts)))
+        context_vecs = np.array([context_vec_map[context] for _, _, _, _, context in mentions])
         atom_vecs = np.array([atom_vec_map[atom_id] for _, _, atom_id, _, _ in mentions])
         vecs = (atom_vecs + context_vecs) / 2
         vecs = vecs / np.linalg.norm(vecs, axis=1, keepdims=True)
