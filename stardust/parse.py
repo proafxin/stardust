@@ -46,7 +46,7 @@ def _clean(raw: str) -> tuple[str, OffsetMap]:
 
 
 def _token_count(text: str) -> int:
-    return len(embedder().tokenizer.encode(text, add_special_tokens=False))
+    return len(embedder().tokenizer.encode(text, add_special_tokens=False, verbose=False))
 
 
 def _buffer_tokens(buf: list[str]) -> int:

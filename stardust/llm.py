@@ -27,4 +27,10 @@ async def ollama_unload() -> None:
     payload = {"model": OLLAMA_MODEL, "messages": [], "keep_alive": 0}
     async with httpx.AsyncClient(timeout=30) as client:
         await client.post(url, json=payload)
-    await asyncio.sleep(3)
+    ps_url = f"http://{settings.ollama_host}:{settings.ollama_port}/api/ps"
+    async with httpx.AsyncClient(timeout=30) as client:
+        for _ in range(30):
+            await asyncio.sleep(1)
+            resp = await client.get(ps_url)
+            if not resp.json().get("models"):
+                break
