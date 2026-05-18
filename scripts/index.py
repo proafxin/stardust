@@ -292,7 +292,7 @@ async def phase_nlp() -> None:
 # ── Phase 3: LLM pronoun resolution (Ollama / Qwen3 4B) ─────────────────────
 
 
-async def _process_llm_batch(batch: list[tuple[int, str, list]], keep_alive: str = "5m") -> list[dict]:
+async def _process_llm_batch(batch: list[tuple[int, str, list]], batch_idx: int, keep_alive: str = "5m") -> dict:
     atom_data = []
     for atom_id, value, nlp_attrs in batch:
         attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
@@ -300,8 +300,9 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]], keep_alive: str
         if entry:
             atom_data.append(entry)
     if not atom_data:
-        return []
+        return {}
     prompt = build_batch_prompt(atom_data)
+    (Path("prompts") / f"batch_{batch_idx}.md").write_text(prompt)
     raw = await ollama_complete(prompt, max_tokens=max(500, len(atom_data) * 50), keep_alive=keep_alive)
     try:
         start, end = raw.find("{"), raw.rfind("}") + 1
@@ -366,7 +367,7 @@ async def phase_llm() -> None:
         keep_alive = "0" if i == len(batches) - 1 else "5m"
         while True:
             try:
-                pronoun_map = await _process_llm_batch(batch, keep_alive)
+                pronoun_map = await _process_llm_batch(batch, i, keep_alive)
                 global_tokens: dict[int, tuple[int, TokenAttributes]] = {}
                 token_counter = 0
                 for atom_id, _value, nlp_attrs in batch:
@@ -377,11 +378,8 @@ async def phase_llm() -> None:
                 async with SessionLocal() as session:
                     atom_disambig: dict[int, list] = {atom_id: [] for atom_id, _, _ in batch}
                     for tid_str, rid in pronoun_map.items():
-                        try:
-                            tid = int(tid_str)
-                        except ValueError:
-                            continue
-                        if not isinstance(rid, int) or tid not in global_tokens or rid not in global_tokens:
+                        tid = int(tid_str)
+                        if tid not in global_tokens or rid not in global_tokens:
                             continue
                         atom_id, matched = global_tokens[tid]
                         _, referent_token = global_tokens[rid]
