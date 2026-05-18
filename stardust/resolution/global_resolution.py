@@ -1,12 +1,13 @@
-import asyncio
 import logging
+import re
+import unicodedata
 from collections import defaultdict
 
 import faiss
 import numpy as np
 import torch
 
-from stardust.config import EMBEDDING_DIM, EMBEDDING_INTERNAL_BATCH_SIZE, ENTITY_MERGE_THRESHOLD, GLOBAL_MERGE_THRESHOLD
+from stardust.config import EMBEDDING_INTERNAL_BATCH_SIZE, ENTITY_MERGE_THRESHOLD, GLOBAL_MERGE_THRESHOLD
 from stardust.registry import embedder as load_embedder
 from stardust.tree.atom import SpanOffset
 
@@ -21,20 +22,37 @@ class CanonicalEntity:
         self.aliases: list[str] = list({m[0] for m in mentions})
 
 
+def _normalize(surface: str) -> str:
+    s = unicodedata.normalize("NFKC", surface)
+    s = re.sub(r"'s\b", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"[^\w\s]", "", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+class _UF:
+    def __init__(self, n: int) -> None:
+        self.p = list(range(n))
+
+    def find(self, x: int) -> int:
+        while self.p[x] != x:
+            self.p[x] = self.p[self.p[x]]
+            x = self.p[x]
+        return x
+
+    def union(self, x: int, y: int) -> None:
+        self.p[self.find(x)] = self.find(y)
+
+
 def _encode(embedder, texts: list[str]) -> np.ndarray:
     log.info("encode: %d texts, VRAM free %.2fGB", len(texts), torch.cuda.mem_get_info()[0] / 1024**3)
-    
     if not texts:
         return np.array([])
-    
-    # Let SentenceTransformer handle batching internally with batch_size parameter
     result = embedder.encode(
         texts,
         batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
         normalize_embeddings=True,
         show_progress_bar=False,
     )
-    
     log.info("encode done, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
     return np.array(result)
 
@@ -47,7 +65,6 @@ def _greedy_cluster(vecs: np.ndarray, threshold: float) -> list[list[int]]:
     index.add(vecs)
     assigned = [False] * len(vecs)
     clusters: list[list[int]] = []
-    # search k nearest neighbors for each vector
     k = min(64, len(vecs))
     distances, indices = index.search(vecs, k)
     for i in range(len(vecs)):
@@ -103,10 +120,41 @@ def _disambiguate(
 
     global_entities: list[CanonicalEntity] = []
     for canonical_type, mentions in by_type.items():
-        unique_contexts = list({context for _, _, _, _, context in mentions})
-        context_vec_map = dict(zip(unique_contexts, _encode(embedder, unique_contexts)))
-        context_vecs = np.array([context_vec_map[context] for _, _, _, _, context in mentions])
-        atom_vecs = np.array([atom_vec_map[atom_id] for _, _, atom_id, _, _ in mentions])
+        n = len(mentions)
+        uf = _UF(n)
+        norms = [_normalize(m[0]) for m in mentions]
+
+        # step 4: union exact normalized surface matches
+        norm_to_indices: dict[str, list[int]] = defaultdict(list)
+        for i, norm in enumerate(norms):
+            norm_to_indices[norm].append(i)
+        for indices in norm_to_indices.values():
+            for idx in indices[1:]:
+                uf.union(indices[0], idx)
+
+        # step 5: subsumption — if norm(A) is a non-empty substring of norm(B), union them
+        for i in range(n):
+            if not norms[i]:
+                continue
+            for j in range(n):
+                if i == j or not norms[j] or norms[i] == norms[j]:
+                    continue
+                if norms[i] in norms[j]:
+                    uf.union(i, j)
+
+        # step 6: one representative per union-find group for embedding clustering
+        groups: dict[int, list[int]] = defaultdict(list)
+        for i in range(n):
+            groups[uf.find(i)].append(i)
+
+        rep_indices = [indices[0] for indices in groups.values()]
+        rep_contexts = [mentions[i][4] for i in rep_indices]
+        rep_atom_ids = [mentions[i][2] for i in rep_indices]
+
+        unique_rep_contexts = list({c for c in rep_contexts})
+        context_vec_map = dict(zip(unique_rep_contexts, _encode(embedder, unique_rep_contexts)))
+        context_vecs = np.array([context_vec_map[rep_contexts[k]] for k in range(len(rep_indices))])
+        atom_vecs = np.array([atom_vec_map[rep_atom_ids[k]] for k in range(len(rep_indices))])
         vecs = (atom_vecs + context_vecs) / 2
         vecs = vecs / np.linalg.norm(vecs, axis=1, keepdims=True)
 
@@ -118,7 +166,8 @@ def _disambiguate(
         for global_cluster in global_clusters:
             merged: list[tuple[str, SpanOffset, int, str]] = []
             for local_idx in global_cluster:
-                for mention_idx in local_clusters[local_idx]:
+                rep_i = rep_indices[local_idx]
+                for mention_idx in groups[uf.find(rep_i)]:
                     surface, offset, atom_id, record_id, _ = mentions[mention_idx]
                     merged.append((surface, offset, atom_id, record_id))
             global_entities.append(CanonicalEntity(canonical_type, merged))

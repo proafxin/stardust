@@ -258,8 +258,6 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
 
     for block_type, text in blocks:
         if block_type == "heading":
-            async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
-                yield item
             sec_clean, _ = _clean(text)
             current_section_value = f"{page_value} | {sec_clean}"
             sec_node = _make_node(
@@ -271,6 +269,11 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
             state.raw_pos += len(text)
             state.clean_pos += len(sec_clean)
             yield ParsedNode(node=sec_node, is_atom=False)
+            content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{current_section_value} | ")
+            if _buffer_tokens(buffer + [text]) > content_limit and buffer:
+                async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
+                    yield item
+            buffer.append(text)
         else:
             content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{current_section_value} | ")
             if _buffer_tokens(buffer + [text]) > content_limit and buffer:

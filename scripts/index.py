@@ -42,8 +42,8 @@ DATASETS: list[tuple[str, Path, str]] = [
     ("crag_open", DATA_DIR / "crag" / "open" / "train.parquet", "crag_open"),
 ]
 
+DISAMBIGUATION_CACHE = DATA_DIR / "disambiguation_cache.json"
 
-# ── Phase 1: Normalize and persist ──────────────────────────────────────────
 
 
 NORMALIZE_WORKERS = 4
@@ -244,6 +244,18 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]], keep_alive: str
 async def phase_llm() -> None:
     log.info("phase 3: llm pronoun resolution")
     log.info("phase 3: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+
+    if DISAMBIGUATION_CACHE.exists():
+        cache = json.loads(DISAMBIGUATION_CACHE.read_text())
+        async with SessionLocal() as session:
+            for entry in cache:
+                await session.execute(
+                    update(AtomModel)
+                    .where(AtomModel.id == entry["id"], AtomModel.disambiguation.is_(None))
+                    .values(disambiguation=entry["disambiguation"])
+                )
+            await session.commit()
+        log.info("phase 3: loaded %d disambiguation entries from cache", len(cache))
 
     async with SessionLocal() as session:
         result = await session.execute(
