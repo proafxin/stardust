@@ -122,6 +122,7 @@ def _clean_filename(filename: str) -> str:
     return re.sub(r'\s+', ' ', s).strip()
 
 
+def _make_node(
     nid: int,
     node_type: str,
     value: str,
