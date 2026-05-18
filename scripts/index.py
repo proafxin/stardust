@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import hashlib
 import json
 import logging
@@ -422,20 +423,30 @@ async def phase_disambiguation() -> None:
 
 async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: bool = False) -> None:
     if not skip_normalize:
+        unload_embedder()
+        unload_nlp()
+        gc.collect()
+        torch.cuda.empty_cache()
         load_embedder()
         await phase_normalize()
     if not skip_nlp:
         unload_embedder()
+        unload_nlp()
+        gc.collect()
+        torch.cuda.empty_cache()
         load_nlp()
         await phase_nlp()
+    if not skip_llm:
+        unload_embedder()
         unload_nlp()
-    import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        await phase_llm()
+    unload_embedder()
+    unload_nlp()
     gc.collect()
     torch.cuda.empty_cache()
     load_embedder()
-    if not skip_llm:
-        await phase_llm()
-    torch.cuda.empty_cache()
     await phase_disambiguation()
 
 
