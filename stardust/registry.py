@@ -18,6 +18,11 @@ def unload_nlp() -> None:
     if nlp.cache_info().currsize:
         nlp.cache_clear()
         torch.cuda.empty_cache()
+        try:
+            import cupy
+            cupy.get_default_memory_pool().free_all_blocks()
+        except ImportError:
+            pass
 
 
 @cache

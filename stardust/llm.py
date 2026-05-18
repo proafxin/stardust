@@ -1,9 +1,11 @@
 import asyncio
+import logging
 
 import httpx
 
 from stardust.config import settings
 
+log = logging.getLogger(__name__)
 OLLAMA_MODEL = "qwen3:4b"
 
 
@@ -57,3 +59,4 @@ async def ollama_unload() -> None:
         if await _vram_free_mb() >= total_mb * 0.7:
             break
         await asyncio.sleep(1)
+    log.info("ollama unloaded, VRAM free %dMiB", await _vram_free_mb())

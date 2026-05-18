@@ -307,7 +307,7 @@ async def phase_llm() -> None:
                 log.warning("phase 3: batch %d failed (%s), retrying in 10s", i + 1, e)
                 await asyncio.sleep(10)
 
-    log.info("phase 3: done, ollama unloaded")
+    log.info("phase 3: done")
     await ollama_unload()
 
 
