@@ -49,6 +49,8 @@ def _token_count(text: str) -> int:
     return len(embedder().tokenizer.encode(text, add_special_tokens=False))
 
 
+def _buffer_tokens(buf: list[str]) -> int:
+    return _token_count(" ".join(buf)) if buf else 0
 
 def _make_node(
     nid: int,
@@ -138,17 +140,12 @@ async def normalize_hotpotqa(record: dict[str, Any], start_id: int = 0) -> Async
     yield ParsedNode(node=doc_node, is_atom=False)
 
     buffer: list[str] = []
-    buffer_tokens = 0
-    prefix_tokens = _token_count(f"{doc_value} | ")
-    content_limit = ATOM_TOKEN_LIMIT - prefix_tokens
+    content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{doc_value} | ")
     for sentence in (s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()):
-        tokens = _token_count(sentence)
-        if buffer_tokens + tokens > content_limit and buffer:
+        if _buffer_tokens(buffer + [sentence]) > content_limit and buffer:
             async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.id, state):
                 yield item
-            buffer_tokens = 0
         buffer.append(sentence)
-        buffer_tokens += tokens
     async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.id, state):
         yield item
 
@@ -170,17 +167,12 @@ async def normalize_qasper(record: dict[str, Any], start_id: int = 0) -> AsyncGe
     yield ParsedNode(node=doc_node, is_atom=False)
 
     buffer: list[str] = []
-    buffer_tokens = 0
-    prefix_tokens = _token_count(f"{doc_clean} | ")
-    content_limit = ATOM_TOKEN_LIMIT - prefix_tokens
+    content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{doc_clean} | ")
     for para in sentences:
-        tokens = _token_count(para)
-        if buffer_tokens + tokens > content_limit and buffer:
+        if _buffer_tokens(buffer + [para]) > content_limit and buffer:
             async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.id, state):
                 yield item
-            buffer_tokens = 0
         buffer.append(para)
-        buffer_tokens += tokens
     async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.id, state):
         yield item
 
@@ -255,17 +247,12 @@ async def _normalize_crag_search_results(
     clean_snippet, _ = _clean(snippet)
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", clean_snippet) if s.strip()]
     buffer: list[str] = []
-    buffer_tokens = 0
-    prefix_tokens = _token_count(f"{page_value} | ")
-    content_limit = ATOM_TOKEN_LIMIT - prefix_tokens
+    content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{page_value} | ")
     for sentence in sentences:
-        tokens = _token_count(sentence)
-        if buffer_tokens + tokens > content_limit and buffer:
+        if _buffer_tokens(buffer + [sentence]) > content_limit and buffer:
             async for item in _flush_buffer(buffer, atom_level, page_value, page_node.id, state):
                 yield item
-            buffer_tokens = 0
         buffer.append(sentence)
-        buffer_tokens += tokens
     async for item in _flush_buffer(buffer, atom_level, page_value, page_node.id, state):
         yield item
 
@@ -294,7 +281,6 @@ async def _normalize_crag_markdown(
     current_section_id = page_node.id
     current_section_value = page_value
     buffer: list[str] = []
-    buffer_tokens = 0
 
     for line in content.splitlines():
         stripped = line.strip()
@@ -303,7 +289,6 @@ async def _normalize_crag_markdown(
         if stripped.startswith("#"):
             async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
                 yield item
-            buffer_tokens = 0
             heading = stripped.lstrip("#").strip()
             sec_clean, _ = _clean(heading)
             current_section_value = f"{page_value} | {sec_clean}"
@@ -323,15 +308,11 @@ async def _normalize_crag_markdown(
             state.clean_pos += len(sec_clean)
             yield ParsedNode(node=sec_node, is_atom=False)
         else:
-            tokens = _token_count(stripped)
-            section_prefix_tokens = _token_count(f"{current_section_value} | ")
-            content_limit = ATOM_TOKEN_LIMIT - section_prefix_tokens
-            if buffer_tokens + tokens > content_limit and buffer:
+            content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{current_section_value} | ")
+            if _buffer_tokens(buffer + [stripped]) > content_limit and buffer:
                 async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
                     yield item
-                buffer_tokens = 0
             buffer.append(stripped)
-            buffer_tokens += tokens
 
     async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
         yield item
