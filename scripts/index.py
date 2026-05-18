@@ -4,6 +4,7 @@ import gc
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -473,9 +474,8 @@ async def phase_disambiguation() -> None:
         for _, _, atom_id, _ in entity.mentions:
             atom_aliases.setdefault(atom_id, []).extend(entity.aliases)
 
-def _content(value: str) -> str:
+    def _content(value: str) -> str:
         raw = value.split(" | ", 1)[-1] if " | " in value else value
-        # strip uuid/hash tokens and url-encoded strings
         raw = re.sub(r'\b[0-9a-f]{32}\b', '', raw)
         raw = re.sub(r'https?%3A%2F%2F\S+', '', raw)
         raw = re.sub(r'https?://\S+', '', raw)
