@@ -120,11 +120,21 @@ def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes])
 def build_batch_prompt(atom_data: list[dict]) -> str:
     if not atom_data:
         return ""
+    lines = []
+    for a in atom_data:
+        entities = ", ".join(f"{e['text']}({e['type']})" for e in a["entities"])
+        pronouns = ", ".join(f"{p['text']}@{p['offset'][0]}" for p in a["pronouns"])
+        lines.append(f"[{a['atom_id']}] {a['text']} | entities: {entities} | pronouns: {pronouns}")
+    examples = (
+        "[12] Sarah joined the firm in 2005. She became partner within three years. | entities: Sarah(PERSON), firm(ORG) | pronouns: She@36\n"
+        "=> [{\"atom_id\":12,\"offset\":[36,39],\"pronoun\":\"She\",\"local_entity\":\"Sarah\",\"confidence\":0.99}]\n"
+        "[47] The treaty was signed by France and Germany. It came into force in 1920. | entities: France(GPE), Germany(GPE) | pronouns: It@50\n"
+        "=> [{\"atom_id\":47,\"offset\":[50,52],\"pronoun\":\"It\",\"local_entity\":\"treaty\",\"confidence\":0.85}]\n"
+        "[83] NASA launched the probe. Engineers monitored its trajectory closely. | entities: NASA(ORG), probe(PRODUCT) | pronouns: its@46\n"
+        "=> [{\"atom_id\":83,\"offset\":[46,49],\"pronoun\":\"its\",\"local_entity\":\"probe\",\"confidence\":0.97}]"
+    )
     return (
-        "You are a coreference resolver. For each pronoun below, identify which named entity "
-        "within this batch it refers to. Use the entity list, dependency relation (dep), and "
-        "morphological features (morph) as signals.\n"
-        "Return a JSON array only, no other text. Each object must have:\n"
-        "  atom_id (int), offset ([start, end]), pronoun (str), local_entity (str), confidence (float 0-1)\n\n"
-        f"Atoms:\n{json.dumps(atom_data, indent=2)}"
+        "Resolve pronoun coreference. For each pronoun, output one JSON object: atom_id, offset([start,end]), pronoun, local_entity, confidence.\n\n"
+        f"{examples}\n\n"
+        + "\n".join(lines) + "\n=>"
     )

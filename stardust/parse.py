@@ -81,6 +81,11 @@ def _md_blocks(markdown: str) -> list[tuple[str, str]]:
             if text:
                 blocks.append(("paragraph", text))
         elif t == "List":
+            for item in (node.get("children") or []):
+                text = _extract_text(item).strip()
+                if text:
+                    blocks.append(("paragraph", text))
+        elif t == "Quote":
             text = _extract_text(node).strip()
             if text:
                 blocks.append(("paragraph", text))

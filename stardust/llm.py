@@ -13,9 +13,14 @@ async def ollama_complete(prompt: str, max_tokens: int = 4096, keep_alive: str =
     url = f"http://{settings.ollama_host}:{settings.ollama_port}/api/chat"
     payload = {
         "model": OLLAMA_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "system", "content": "You output only valid JSON. No explanation, no markdown, no reasoning."},
+            {"role": "user", "content": prompt},
+        ],
         "stream": False,
+        "format": {"type": "array", "items": {"type": "object"}},
         "options": {"num_predict": max_tokens, "num_ctx": 12288},
+        "think": False,
         "keep_alive": keep_alive,
     }
     async with httpx.AsyncClient(timeout=300) as client:
