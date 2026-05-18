@@ -33,4 +33,5 @@ async def ollama_unload() -> None:
             await asyncio.sleep(1)
             resp = await client.get(ps_url)
             if not resp.json().get("models"):
+                await asyncio.sleep(3)
                 break

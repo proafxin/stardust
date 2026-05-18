@@ -62,6 +62,9 @@ def collect_entity_mentions(
         for surface, ent_type, offset in _entity_spans(node.nlp_attributes):
             if not ent_type:
                 continue
+            span_tokens = [a for a in node.nlp_attributes if offset.start <= a.offset.start < offset.end]
+            if not any(t.pos_ in ("NOUN", "PROPN") for t in span_tokens):
+                continue
             window = _context_window(node.nlp_attributes, offset.start, offset.end)
             relations = _relation_triples(node.nlp_attributes, offset.start, offset.end)
             context = " ".join(filter(None, [surface, window, relations]))
