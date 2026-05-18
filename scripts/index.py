@@ -413,17 +413,13 @@ async def phase_disambiguation() -> None:
 
 async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: bool = False) -> None:
     if not skip_normalize:
-        log.info("loading embedding model")
         load_embedder()
         await phase_normalize()
     if not skip_nlp:
         unload_embedder()
-        log.info("loading nlp model")
         load_nlp()
         await phase_nlp()
-        log.info("unloading nlp model")
         unload_nlp()
-    log.info("loading embedding model")
     load_embedder()
     if not skip_llm:
         await phase_llm()
