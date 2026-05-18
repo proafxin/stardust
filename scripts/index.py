@@ -18,7 +18,7 @@ from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
-from stardust.registry import unload_nlp
+from stardust.registry import unload_embedder, unload_nlp
 from stardust.resolution.global_resolution import merge_across_records
 from stardust.resolution.local import (
     _pronoun_spans,
@@ -417,11 +417,15 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     if not skip_normalize:
         await phase_normalize()
     if not skip_nlp:
+        log.info("unloading embedding model")
+        unload_embedder()
         log.info("loading nlp model")
         load_nlp()
         await phase_nlp()
         log.info("unloading nlp model")
         unload_nlp()
+        log.info("reloading embedding model")
+        load_embedder()
     if not skip_llm:
         await phase_llm()
     await phase_disambiguation()

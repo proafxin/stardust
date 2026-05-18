@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 
 from stardust.config import settings
@@ -25,3 +27,4 @@ async def ollama_unload() -> None:
     payload = {"model": OLLAMA_MODEL, "messages": [], "keep_alive": 0}
     async with httpx.AsyncClient(timeout=30) as client:
         await client.post(url, json=payload)
+    await asyncio.sleep(3)

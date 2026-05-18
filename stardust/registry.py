@@ -28,6 +28,12 @@ def embedder() -> SentenceTransformer:
     return model
 
 
+def unload_embedder() -> None:
+    if embedder.cache_info().currsize:
+        embedder.cache_clear()
+        torch.cuda.empty_cache()
+
+
 @cache
 def reranker() -> CrossEncoder:
     return CrossEncoder(RERANKER_MODEL, device="cuda")
