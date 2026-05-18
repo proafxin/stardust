@@ -11,12 +11,12 @@ import torch
 from redis.asyncio import Redis
 from sqlalchemy import select, text, update
 
-from stardust.config import EMBEDDING_BATCH_SIZE, EMBEDDING_INTERNAL_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, NLP_COMMIT_BATCH_SIZE, settings
+from stardust.config import ATOM_TOKEN_LIMIT, EMBEDDING_BATCH_SIZE, EMBEDDING_INTERNAL_BATCH_SIZE, LLM_BATCH_TOKEN_LIMIT, NLP_BATCH_SIZE, NLP_COMMIT_BATCH_SIZE, settings
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
 from stardust.models import AtomModel
-from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper
+from stardust.parse import normalize_crag, normalize_hotpotqa, normalize_qasper, _token_count
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
@@ -89,8 +89,24 @@ async def _reader_worker(parquet_path: Path, id_prefix: str, redis: Redis, n_rea
         await redis.set(READ_DONE_KEY + ":all", 1)
 
 
+CROSS_RECORD_TOKEN_LIMIT = ATOM_TOKEN_LIMIT
+
 async def _normalize_worker(redis: Redis, worker_id: int) -> None:
     consumer = f"normalize-{worker_id}"
+    buf_values: list[str] = []
+    buf_node: Node | None = None
+
+    async def _flush(doc_id: str) -> None:
+        nonlocal buf_node
+        if not buf_values or buf_node is None:
+            return
+        bundled = buf_node.model_copy(update={"value": " ".join(buf_values)})
+        await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
+            "record_id": doc_id, "nodes": [bundled.model_dump()], "atoms": [bundled.id],
+        })})
+        buf_values.clear()
+        buf_node = None
+
     while True:
         entries = await redis.xreadgroup(READ_GROUP, consumer, {READ_STREAM: ">"}, count=10, block=500)
         if not entries:
@@ -108,19 +124,36 @@ async def _normalize_worker(redis: Redis, worker_id: int) -> None:
                     continue
                 start_id = await _next_ids(redis, len(raw_nodes))
                 id_map = {j: start_id + j for j in range(len(raw_nodes))}
-                nodes: list[Node] = []
-                atoms: list[int] = []
+                non_atom_nodes: list[Node] = []
+                atom_nodes: list[Node] = []
                 for j, parsed in enumerate(raw_nodes):
                     node = parsed.node.model_copy(update={
                         "id": id_map[j],
                         "parent_id": id_map[parsed.node.parent_id] if parsed.node.parent_id is not None else None,
                     })
-                    nodes.append(node)
                     if parsed.is_atom:
-                        atoms.append(node.id)
-                await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
-                    "record_id": doc_id, "nodes": [n.model_dump() for n in nodes], "atoms": atoms,
-                })})
+                        atom_nodes.append(node)
+                    else:
+                        non_atom_nodes.append(node)
+
+                if non_atom_nodes:
+                    await redis.xadd(NORMALIZE_STREAM, {"doc": json.dumps({
+                        "record_id": doc_id,
+                        "nodes": [n.model_dump() for n in non_atom_nodes],
+                        "atoms": [],
+                    })})
+
+                for node in atom_nodes:
+                    if buf_values and _token_count(" ".join(buf_values + [node.value])) > CROSS_RECORD_TOKEN_LIMIT:
+                        await _flush(doc_id)
+                    buf_values.append(node.value)
+                    buf_node = node.model_copy(update={"parent_id": None})
+                    if _token_count(" ".join(buf_values)) >= CROSS_RECORD_TOKEN_LIMIT:
+                        await _flush(doc_id)
+
+    if buf_values:
+        await _flush("bundled")
+
     log.info("normalize worker done")
     await redis.incr(NORMALIZE_DONE_KEY)
 

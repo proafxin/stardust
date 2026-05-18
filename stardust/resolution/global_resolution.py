@@ -131,8 +131,8 @@ def _disambiguate(
 
         # step 4: union exact normalized surface matches
         norm_to_indices: dict[str, list[int]] = defaultdict(list)
-        for i, norm in enumerate(norms):
-            norm_to_indices[norm].append(i)
+        for idx, norm in enumerate(norms):
+            norm_to_indices[norm].append(idx)
         for indices in norm_to_indices.values():
             for idx in indices[1:]:
                 uf.union(indices[0], idx)
@@ -141,15 +141,15 @@ def _disambiguate(
         unique_norms = sorted(set(norms), key=len)
         norm_rep: dict[str, int] = {}
         for norm in unique_norms:
-            for i, n in enumerate(norms):
-                if n == norm:
+            for i, s in enumerate(norms):
+                if s == norm:
                     norm_rep[norm] = i
                     break
-        for i, short in enumerate(unique_norms):
+        for si, short in enumerate(unique_norms):
             if not short:
                 continue
             pattern = re.compile(r'\b' + re.escape(short) + r'\b')
-            for long in unique_norms[i + 1:]:
+            for long in unique_norms[si + 1:]:
                 if pattern.search(long):
                     uf.union(norm_rep[short], norm_rep[long])
 
