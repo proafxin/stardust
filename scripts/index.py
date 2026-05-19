@@ -62,7 +62,6 @@ INSERT_STREAM = "stardust:stream:insert"
 READ_GROUP = "stardust:read:group"
 NORMALIZE_GROUP = "stardust:normalize:group"
 INSERT_GROUP = "stardust:insert:group"
-NODE_ID_KEY = "stardust:node_id_counter"
 READ_DONE_KEY = "stardust:read_done"
 NORMALIZE_DONE_KEY = "stardust:normalize_done"
 BATCH_DONE_KEY = "stardust:batch_done"
@@ -72,11 +71,6 @@ _NORMALIZER_MAP = {
     "qasper": normalize_qasper,
     "crag_open": normalize_crag,
 }
-
-
-async def _next_ids(redis: Redis, count: int) -> int:
-    end = await redis.incrby(NODE_ID_KEY, count)
-    return int(end) - count
 
 
 async def _reader_worker(parquet_path: Path, id_prefix: str, redis: Redis, n_readers: int) -> None:
@@ -114,7 +108,7 @@ async def _normalize_worker(redis: Redis, worker_id: int) -> None:
                     {
                         "record_id": doc_id,
                         "nodes": [bundled.model_dump()],
-                        "atoms": [bundled.id],
+                        "atoms": [bundled.transient_id],
                     }
                 )
             },
@@ -133,35 +127,29 @@ async def _normalize_worker(redis: Redis, worker_id: int) -> None:
                 payload = json.loads(data[b"record"])
                 record, id_prefix, i = payload["data"], payload["id_prefix"], payload["i"]
                 doc_id = f"{id_prefix}_{i}"
-                raw_nodes: list[Any] = [parsed async for parsed in _NORMALIZER_MAP[id_prefix](record, 0)]
+                raw_nodes: list[Any] = [parsed async for parsed in _NORMALIZER_MAP[id_prefix](record)]
                 await redis.xack(READ_STREAM, READ_GROUP, msg_id)
                 if not raw_nodes:
                     continue
-                start_id = await _next_ids(redis, len(raw_nodes))
-                id_map = {j: start_id + j for j in range(len(raw_nodes))}
                 non_atom_nodes: list[Node] = []
                 atom_nodes: list[Node] = []
-                for j, parsed in enumerate(raw_nodes):
-                    node = parsed.node.model_copy(
-                        update={
-                            "id": id_map[j],
-                            "parent_id": id_map[parsed.node.parent_id] if parsed.node.parent_id is not None else None,
-                        }
-                    )
+                atom_transient_ids: list[int] = []
+                for parsed in raw_nodes:
                     if parsed.is_atom:
-                        atom_nodes.append(node)
+                        atom_nodes.append(parsed.node)
+                        atom_transient_ids.append(parsed.node.transient_id)
                     else:
-                        non_atom_nodes.append(node)
+                        non_atom_nodes.append(parsed.node)
 
-                if non_atom_nodes:
+                if non_atom_nodes or atom_nodes:
                     await redis.xadd(
                         NORMALIZE_STREAM,
                         {
                             "doc": json.dumps(
                                 {
                                     "record_id": doc_id,
-                                    "nodes": [n.model_dump() for n in non_atom_nodes],
-                                    "atoms": [],
+                                    "nodes": [n.model_dump() for n in non_atom_nodes + atom_nodes],
+                                    "atoms": atom_transient_ids,
                                 }
                             )
                         },
@@ -171,7 +159,7 @@ async def _normalize_worker(redis: Redis, worker_id: int) -> None:
                     if buf_values and _token_count(" ".join([*buf_values, node.value])) > CROSS_RECORD_TOKEN_LIMIT:
                         await _flush(doc_id)
                     buf_values.append(node.value)
-                    buf_node = node.model_copy(update={"parent_id": None})
+                    buf_node = node.model_copy(update={"transient_parent_id": None})
                     if _token_count(" ".join(buf_values)) >= CROSS_RECORD_TOKEN_LIMIT:
                         await _flush(doc_id)
 
@@ -231,7 +219,6 @@ async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
     redis = Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=False)
     await redis.delete(
-        NODE_ID_KEY,
         READ_STREAM,
         NORMALIZE_STREAM,
         INSERT_STREAM,

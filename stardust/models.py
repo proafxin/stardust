@@ -10,13 +10,14 @@ from stardust.config import EMBEDDING_DIM
 
 
 class Base(DeclarativeBase):
-    pass
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class TreeNodeModel(Base):
     __tablename__ = "tree_nodes"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tree_nodes.id"), nullable=True)
     node_type: Mapped[str] = mapped_column(String(32))
@@ -34,7 +35,6 @@ class TreeNodeModel(Base):
 class AtomModel(Base):
     __tablename__ = "atoms"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tree_nodes.id"), nullable=True)
     value: Mapped[str] = mapped_column(Text)
@@ -60,15 +60,13 @@ class AtomModel(Base):
 class BatchPromptModel(Base):
     __tablename__ = "batch_prompts"
 
-    batch_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_no: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     prompt: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class CanonicalEntityModel(Base):
     __tablename__ = "canonical_entities"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     canonical_name: Mapped[str] = mapped_column(Text)
     entity_type: Mapped[str] = mapped_column(String(64))
     aliases: Mapped[list] = mapped_column(JSONB, default=[])
@@ -79,7 +77,6 @@ class CanonicalEntityModel(Base):
 class EntityMentionModel(Base):
     __tablename__ = "entity_mentions"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"))
     record_id: Mapped[str] = mapped_column(String(256), nullable=False)
     canonical_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("canonical_entities.id"), nullable=True)

@@ -21,47 +21,45 @@ class RankedAtom:
     score: float
 
 
-_INSERT_CHUNK = 3_000  # 9 cols in tree_nodes, 8 in atoms → safe under 32767 param limit
+_INSERT_CHUNK = 3_000
 
 
 async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: AsyncSession) -> None:
-    atom_set_per_record = {record_id: set(atoms) for record_id, _, atoms in docs}
-    tree_rows = [
-        {
-            "id": node.id,
-            "record_id": record_id,
-            "parent_id": node.parent_id,
-            "node_type": node.node_type,
-            "modality": node.modality.value,
-            "value": node.value,
-            "raw_offset": node.raw_offset.model_dump(),
-            "clean_offset": node.clean_offset.model_dump(),
-            "nlp_attributes": [],
-            "disambiguation": None,
-        }
-        for record_id, nodes, _ in docs
-        for node in nodes
-    ]
-    atom_rows = [
-        {
-            "id": node.id,
-            "record_id": record_id,
-            "parent_id": node.parent_id,
-            "value": node.value,
-            "raw_offset": node.raw_offset.model_dump(),
-            "clean_offset": node.clean_offset.model_dump(),
-            "nlp_attributes": [],
-            "disambiguation": None,
-            "embedding": None,
-        }
-        for record_id, nodes, _ in docs
-        for node in nodes
-        if node.id in atom_set_per_record[record_id]
-    ]
-    for i in range(0, len(tree_rows), _INSERT_CHUNK):
-        await session.execute(insert(TreeNodeModel), tree_rows[i : i + _INSERT_CHUNK])
-    for i in range(0, len(atom_rows), _INSERT_CHUNK):
-        await session.execute(insert(AtomModel), atom_rows[i : i + _INSERT_CHUNK])
+    for record_id, nodes, atom_transient_ids in docs:
+        atom_set = set(atom_transient_ids)
+        # insert in order (parse yields parents before children)
+        transient_to_db: dict[int, int] = {}
+        for node in nodes:
+            db_parent_id = transient_to_db.get(node.transient_parent_id) if node.transient_parent_id is not None else None
+            result = await session.execute(
+                insert(TreeNodeModel).values(
+                    record_id=record_id,
+                    parent_id=db_parent_id,
+                    node_type=node.node_type,
+                    modality=node.modality.value,
+                    value=node.value,
+                    raw_offset=node.raw_offset.model_dump(),
+                    clean_offset=node.clean_offset.model_dump(),
+                    nlp_attributes=[],
+                    disambiguation=None,
+                ).returning(TreeNodeModel.id)
+            )
+            db_id = result.scalar_one()
+            transient_to_db[node.transient_id] = db_id
+            if node.transient_id in atom_set:
+                await session.execute(
+                    insert(AtomModel).values(
+                        id=db_id,
+                        record_id=record_id,
+                        parent_id=db_parent_id,
+                        value=node.value,
+                        raw_offset=node.raw_offset.model_dump(),
+                        clean_offset=node.clean_offset.model_dump(),
+                        nlp_attributes=[],
+                        disambiguation=None,
+                        embedding=None,
+                    )
+                )
     await session.commit()
 
 

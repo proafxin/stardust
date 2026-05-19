@@ -14,9 +14,6 @@ from mistletoe.ast_renderer import AstRenderer
 from stardust.config import ATOM_TOKEN_LIMIT
 from stardust.index import OffsetMap
 from stardust.registry import embedder
-from stardust.tree.atom import Modality, Node, SpanOffset
-
-
 def clean_value(value: str) -> str:
     raw = value.rsplit(" | ", 1)[-1] if " | " in value else value
     raw = re.sub(r"\b[0-9a-f]{32}\b", "", raw)
@@ -143,13 +140,13 @@ def _make_node(
     terminal: bool = False,
 ) -> Node:
     return Node(
-        id=nid,
+        transient_id=nid,
+        transient_parent_id=parent_id,
         node_type=node_type,
         modality=Modality.TEXT,
         value=value,
         raw_offset=SpanOffset(start=raw_start, end=raw_start + raw_len),
         clean_offset=SpanOffset(start=clean_start, end=clean_start + clean_len),
-        parent_id=parent_id,
         terminal=terminal,
         nlp_attributes=[],
         disambiguation=None,
@@ -178,9 +175,9 @@ async def _flush_buffer(
     buf.clear()
 
 
-async def normalize_hotpotqa(record: dict[str, Any], start_id: int = 0) -> AsyncGenerator[ParsedNode]:
+async def normalize_hotpotqa(record: dict[str, Any]) -> AsyncGenerator[ParsedNode]:
     corpus_level, doc_level, atom_level = HOTPOTQA_LEVELS
-    state = _State(counter=start_id)
+    state = _State()
 
     corpus_text = "hotpotqa"
     corpus_clean, _ = _clean(corpus_text)
@@ -211,7 +208,7 @@ async def normalize_hotpotqa(record: dict[str, Any], start_id: int = 0) -> Async
         len(title),
         state.clean_pos,
         len(doc_clean),
-        corpus_node.id,
+        corpus_node.transient_id,
     )
     state.counter += 1
     state.raw_pos += len(title)
@@ -222,16 +219,16 @@ async def normalize_hotpotqa(record: dict[str, Any], start_id: int = 0) -> Async
     content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{doc_value} | ")
     for sentence in (s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()):
         if _buffer_tokens([*buffer, sentence]) > content_limit and buffer:
-            async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.id, state):
+            async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.transient_id, state):
                 yield item
         buffer.append(sentence)
-    async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.id, state):
+    async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.transient_id, state):
         yield item
 
 
-async def normalize_qasper(record: dict[str, Any], start_id: int = 0) -> AsyncGenerator[ParsedNode]:
+async def normalize_qasper(record: dict[str, Any]) -> AsyncGenerator[ParsedNode]:
     doc_level, atom_level = QASPER_LEVELS
-    state = _State(counter=start_id)
+    state = _State()
 
     context: str = record.get("context", "")
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", context) if s.strip()]
@@ -249,16 +246,16 @@ async def normalize_qasper(record: dict[str, Any], start_id: int = 0) -> AsyncGe
     content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{doc_clean} | ")
     for para in sentences:
         if _buffer_tokens([*buffer, para]) > content_limit and buffer:
-            async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.id, state):
+            async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.transient_id, state):
                 yield item
         buffer.append(para)
-    async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.id, state):
+    async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.transient_id, state):
         yield item
 
 
-async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGenerator[ParsedNode]:
+async def normalize_crag(record: dict[str, Any]) -> AsyncGenerator[ParsedNode]:
     corpus_level, page_level, section_level, atom_level = CRAG_LEVELS
-    state = _State(counter=start_id)
+    state = _State()
 
     corpus_text = "crag_open"
     corpus_clean, _ = _clean(corpus_text)
@@ -292,7 +289,7 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
         len(filename),
         state.clean_pos,
         len(page_clean),
-        corpus_node.id,
+        corpus_node.transient_id,
     )
     state.counter += 1
     state.raw_pos += len(filename)
@@ -303,7 +300,7 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
     if not blocks:
         return
 
-    current_section_id = page_node.id
+    current_section_id = page_node.transient_id
     current_section_value = page_value
     buffer: list[str] = []
 
@@ -321,7 +318,7 @@ async def normalize_crag(record: dict[str, Any], start_id: int = 0) -> AsyncGene
                 len(sec_clean),
                 page_node.id,
             )
-            current_section_id = sec_node.id
+            current_section_id = sec_node.transient_id
             state.counter += 1
             state.raw_pos += len(text)
             state.clean_pos += len(sec_clean)
