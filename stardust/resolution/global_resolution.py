@@ -16,9 +16,7 @@ _PREAMBLE = (
 )
 
 
-async def canonicalize_by_type(
-    ent_type: str, tokens: list[dict]
-) -> dict[int, list[int]]:
+async def canonicalize_by_type(ent_type: str, tokens: list[dict]) -> dict[int, list[int]]:
     if not tokens:
         return {}
     tokens_str = ", ".join(f"{t['id']}:{t['text']} ({t['context']})" for t in tokens)

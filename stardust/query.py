@@ -6,7 +6,7 @@ from sqlalchemy import cast, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
-from stardust.models import Atom, CanonicalEntity, Disambiguation, EntityMention, Token, TreeNode
+from stardust.models import Atom, CanonicalEntity, Disambiguation, EntityMention, TableRow, TableSignal, Token, TreeNode
 from stardust.registry import embedder as load_embedder
 from stardust.registry import reranker as load_reranker
 from stardust.tree.atom import Node
@@ -62,6 +62,25 @@ async def insert_tokens(atom_id: int, tokens: list[dict], session: AsyncSession)
     await session.execute(insert(Token), [{"atom_id": atom_id, **t} for t in tokens])
 
 
+async def insert_table_signal(
+    record_id: str, title: str, col_names: list[str], row_count: int, session: AsyncSession
+) -> int:
+    result = await session.execute(
+        insert(TableSignal)
+        .values(record_id=record_id, title=title, col_names=col_names, row_count=row_count)
+        .returning(TableSignal.id)
+    )
+    return result.scalar_one()
+
+
+async def insert_table_rows(rows: list[tuple[int, int, int, str]], session: AsyncSession) -> None:
+    if not rows:
+        return
+    await session.execute(
+        insert(TableRow), [{"signal_id": s, "row_idx": r, "col_idx": c, "cell_value": v} for s, r, c, v in rows]
+    )
+
+
 async def insert_canonical_entities(
     entities: list[tuple[str, str, list[str], list[tuple[int, str, int]]]],
     session: AsyncSession,
@@ -74,7 +93,7 @@ async def insert_canonical_entities(
         )
         ce_id = result.scalar_one()
         member_token_ids = [token_id for token_id, _, _ in mentions]
-        for token_id, record_id, atom_id in mentions:
+        for _token_id, record_id, atom_id in mentions:
             session.add(
                 EntityMention(
                     atom_id=atom_id,

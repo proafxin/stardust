@@ -23,18 +23,20 @@ async def extract_batch(
                 for token in sent:
                     if token.pos_ not in _NOMINAL_POS:
                         continue
-                    tokens.append({
-                        "token_index": token.i,
-                        "start": clean_start + token.idx,
-                        "end": clean_start + token.idx + len(token.text),
-                        "text": token.text,
-                        "pos": token.pos_,
-                        "dep": token.dep_,
-                        "morph": {str(k): str(v) for k, v in token.morph.to_dict().items()},
-                        "ent_type": token.ent_type_ or None,
-                        "ent_iob": token.ent_iob_ or None,
-                        "context": context,
-                    })
+                    tokens.append(
+                        {
+                            "token_index": token.i,
+                            "start": clean_start + token.idx,
+                            "end": clean_start + token.idx + len(token.text),
+                            "text": token.text,
+                            "pos": token.pos_,
+                            "dep": token.dep_,
+                            "morph": {str(k): str(v) for k, v in token.morph.to_dict().items()},
+                            "ent_type": token.ent_type_ or None,
+                            "ent_iob": token.ent_iob_ or None,
+                            "context": context,
+                        }
+                    )
             results.append((atom_id, tokens))
         return results
 

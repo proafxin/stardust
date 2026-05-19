@@ -27,8 +27,21 @@ from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
 from stardust.models import Atom, BatchPrompt, CanonicalEntity, Disambiguation, Token
-from stardust.parse import _token_count, clean_value, normalize_crag, normalize_hotpotqa, normalize_qasper
-from stardust.query import insert_canonical_entities, insert_index, insert_tokens
+from stardust.parse import (
+    _parse_md_tables,
+    _token_count,
+    clean_value,
+    normalize_crag,
+    normalize_hotpotqa,
+    normalize_qasper,
+)
+from stardust.query import (
+    insert_canonical_entities,
+    insert_index,
+    insert_table_rows,
+    insert_table_signal,
+    insert_tokens,
+)
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_llm_tokenizer, unload_nlp, unload_reranker
@@ -42,7 +55,7 @@ log = logging.getLogger(__name__)
 _UNRESOLVED_PREAMBLE = (
     "Given an unresolved nominal token and a list of candidate named entities with context, "
     "output the token_id of the named entity this nominal refers to, or null if none apply.\n"
-    "Output a single JSON object: {\"referent_id\": <token_id or null>}\n\n"
+    'Output a single JSON object: {"referent_id": <token_id or null>}\n\n'
 )
 
 DATA_DIR = Path("data")
@@ -88,13 +101,33 @@ async def phase_normalize() -> None:
                     i += 1
                     continue
                 non_atoms = [p.node for p in parsed_nodes if not p.is_atom]
-                atoms = [p.node for p in parsed_nodes if p.is_atom]
-                all_nodes = non_atoms + atoms
-                atom_indices = [len(non_atoms) + i for i in range(len(atoms))]
+                atoms = [p for p in parsed_nodes if p.is_atom]
+                all_nodes = non_atoms + [p.node for p in atoms]
+                atom_indices = [len(non_atoms) + j for j in range(len(atoms))]
                 if all_nodes:
                     async with SessionLocal() as session:
                         await insert_index([(record_id, all_nodes, atom_indices)], session)
-                for node in atoms:
+
+                if id_prefix == "crag_open":
+                    markdown = record.get("markdown", "") or ""
+                    tables = _parse_md_tables(markdown)
+                    if tables:
+                        async with SessionLocal() as session:
+                            for table in tables:
+                                signal_id = await insert_table_signal(
+                                    record_id, table.title, table.col_names, table.row_count, session
+                                )
+                                rows = [
+                                    (signal_id, row_idx, col_idx, cell)
+                                    for row_idx, row_str in enumerate(table.rows)
+                                    for col_idx, cell in enumerate(row_str.split(" | "))
+                                    if cell
+                                ]
+                                await insert_table_rows(rows, session)
+                            await session.commit()
+
+                for p in atoms:
+                    node = p.node
                     if buf_values and _token_count(" ".join([*buf_values, node.value])) > ATOM_TOKEN_LIMIT:
                         await _flush_atom_buffer(buf_values, buf_node, record_id)
                         buf_node = None
@@ -142,19 +175,25 @@ async def phase_nlp() -> None:
 
 async def _stream_atoms_with_tokens() -> AsyncGenerator[tuple[int, str, list[dict]]]:
     async with SessionLocal() as session, session.begin():
-        atom_rows = (await session.execute(
-            select(Atom.id, Atom.value)
-            .join(Token, Token.atom_id == Atom.id)
-            .distinct()
-        )).fetchall()
+        atom_rows = (
+            await session.execute(
+                select(Atom.id, Atom.value)
+                .join(Token, Token.atom_id == Atom.id)
+                .outerjoin(Disambiguation, Disambiguation.atom_id == Atom.id)
+                .where(Disambiguation.id.is_(None))
+                .distinct()
+            )
+        ).fetchall()
 
     for row in atom_rows:
         async with SessionLocal() as session:
-            token_rows = (await session.execute(
-                select(Token.id, Token.token_index, Token.text)
-                .where(Token.atom_id == row.id)
-                .order_by(Token.token_index)
-            )).fetchall()
+            token_rows = (
+                await session.execute(
+                    select(Token.id, Token.token_index, Token.text)
+                    .where(Token.atom_id == row.id)
+                    .order_by(Token.token_index)
+                )
+            ).fetchall()
         yield row.id, row.value, [{"id": t.id, "token_index": t.token_index, "text": t.text} for t in token_rows]
 
 
@@ -174,8 +213,7 @@ async def phase_llm() -> None:
                     start, end = raw.find("{"), raw.rfind("}") + 1
                     result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
                     token_map = {
-                        int(k): int(v) for k, v in result.items()
-                        if str(k).lstrip("-").isdigit() and isinstance(v, int)
+                        int(k): int(v) for k, v in result.items() if str(k).lstrip("-").isdigit() and isinstance(v, int)
                     }
                 except json.JSONDecodeError:
                     log.warning("phase 3: failed to parse LLM response: %s", raw[:200])
@@ -188,13 +226,15 @@ async def phase_llm() -> None:
                             referent_id = token_map.get(t["id"])
                             if referent_id is None or referent_id not in all_token_ids:
                                 continue
-                            rows.append({
-                                "token_id": t["id"],
-                                "referent_id": referent_id,
-                                "canonical_token_id": referent_id,
-                                "atom_id": atom_id,
-                                "confidence": 1.0,
-                            })
+                            rows.append(
+                                {
+                                    "token_id": t["id"],
+                                    "referent_id": referent_id,
+                                    "canonical_token_id": referent_id,
+                                    "atom_id": atom_id,
+                                    "confidence": 1.0,
+                                }
+                            )
                     if rows:
                         await session.execute(insert(Disambiguation), rows)
                     await session.commit()
@@ -231,9 +271,7 @@ async def phase_transitive_closure() -> None:
                 break
             for row in rows:
                 await session.execute(
-                    update(Disambiguation)
-                    .where(Disambiguation.id == row.id)
-                    .values(canonical_token_id=row.final_id)
+                    update(Disambiguation).where(Disambiguation.id == row.id).values(canonical_token_id=row.final_id)
                 )
             await session.commit()
             rounds += 1
@@ -248,21 +286,25 @@ async def phase_unresolved() -> None:
     log.info("phase 3.6: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     async with SessionLocal() as session, session.begin():
-        unresolved_rows = (await session.execute(
-            select(Token.id, Token.atom_id, Token.text, Token.context)
-            .outerjoin(Disambiguation, Disambiguation.token_id == Token.id)
-            .where(Disambiguation.id.is_(None))
-        )).fetchall()
+        unresolved_rows = (
+            await session.execute(
+                select(Token.id, Token.atom_id, Token.text, Token.context)
+                .outerjoin(Disambiguation, Disambiguation.token_id == Token.id)
+                .where(Disambiguation.id.is_(None))
+            )
+        ).fetchall()
 
         if not unresolved_rows:
             log.info("phase 3.6: no unresolved nominals")
             return
 
-        named_entity_rows = (await session.execute(
-            select(Token.id, Token.atom_id, Token.text, Token.context, Token.ent_type)
-            .where(Token.ent_type.is_not(None))
-            .where(Token.ent_type.not_in(NUMERIC_ENTITY_TYPES))
-        )).fetchall()
+        named_entity_rows = (
+            await session.execute(
+                select(Token.id, Token.atom_id, Token.text, Token.context, Token.ent_type)
+                .where(Token.ent_type.is_not(None))
+                .where(Token.ent_type.not_in(NUMERIC_ENTITY_TYPES))
+            )
+        ).fetchall()
 
     if not named_entity_rows:
         log.info("phase 3.6: no named entities to resolve against")
@@ -270,13 +312,20 @@ async def phase_unresolved() -> None:
 
     embedder = load_embedder()
     ne_contexts = [r.context for r in named_entity_rows]
-    ne_vecs = embedder.encode(ne_contexts, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE, normalize_embeddings=True, show_progress_bar=False)
+    ne_vecs = embedder.encode(
+        ne_contexts, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE, normalize_embeddings=True, show_progress_bar=False
+    )
 
     index = faiss.IndexFlatIP(ne_vecs.shape[1])
     index.add(ne_vecs.astype(np.float32))
 
     unresolved_contexts = [r.context for r in unresolved_rows]
-    unresolved_vecs = embedder.encode(unresolved_contexts, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE, normalize_embeddings=True, show_progress_bar=False)
+    unresolved_vecs = embedder.encode(
+        unresolved_contexts,
+        batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
 
     k = min(UNRESOLVED_TOP_K, len(named_entity_rows))
     distances, indices = index.search(unresolved_vecs.astype(np.float32), k)
@@ -284,13 +333,14 @@ async def phase_unresolved() -> None:
     i = 0
     async with SessionLocal() as session:
         for unresolved, dists, idxs in zip(unresolved_rows, distances, indices, strict=False):
-            candidates = [
-                named_entity_rows[j] for j, d in zip(idxs, dists, strict=False) if d > 0.5
-            ]
+            candidates = [named_entity_rows[j] for j, d in zip(idxs, dists, strict=False) if d > 0.5]
             if not candidates:
                 continue
             candidates_str = ", ".join(f"{c.id}:{c.text} ({c.context})" for c in candidates)
-            prompt = _UNRESOLVED_PREAMBLE + f"Token {unresolved.id}:{unresolved.text} ({unresolved.context})\nCandidates: {candidates_str}"
+            prompt = (
+                _UNRESOLVED_PREAMBLE
+                + f"Token {unresolved.id}:{unresolved.text} ({unresolved.context})\nCandidates: {candidates_str}"
+            )
             raw = await ollama_complete(prompt, max_tokens=50)
             try:
                 start, end = raw.find("{"), raw.rfind("}") + 1
@@ -320,15 +370,19 @@ async def phase_canonicalization() -> None:
     log.info("phase 4: global canonicalization")
 
     async with SessionLocal() as session, session.begin():
-        rows = (await session.execute(
-            select(Token.id, Token.atom_id, Token.text, Token.context, Token.ent_type)
-            .where(Token.ent_type.is_not(None))
-            .where(Token.ent_type.not_in(NUMERIC_ENTITY_TYPES))
-        )).fetchall()
+        rows = (
+            await session.execute(
+                select(Token.id, Token.atom_id, Token.text, Token.context, Token.ent_type)
+                .where(Token.ent_type.is_not(None))
+                .where(Token.ent_type.not_in(NUMERIC_ENTITY_TYPES))
+            )
+        ).fetchall()
 
     by_type: dict[str, list[dict]] = {}
     for r in rows:
-        by_type.setdefault(r.ent_type, []).append({"id": r.id, "atom_id": r.atom_id, "text": r.text, "context": r.context})
+        by_type.setdefault(r.ent_type, []).append(
+            {"id": r.id, "atom_id": r.atom_id, "text": r.text, "context": r.context}
+        )
 
     token_to_atom: dict[int, int] = {r.id: r.atom_id for r in rows}
 
@@ -362,11 +416,13 @@ async def phase_embedding() -> None:
     log.info("phase 5: embedding")
 
     async with SessionLocal() as session, session.begin():
-        alias_rows = (await session.execute(
-            select(Disambiguation.atom_id, CanonicalEntity.aliases)
-            .join(CanonicalEntity, CanonicalEntity.id == Disambiguation.canonical_entity_id)
-            .where(Disambiguation.canonical_entity_id.is_not(None))
-        )).fetchall()
+        alias_rows = (
+            await session.execute(
+                select(Disambiguation.atom_id, CanonicalEntity.aliases)
+                .join(CanonicalEntity, CanonicalEntity.id == Disambiguation.canonical_entity_id)
+                .where(Disambiguation.canonical_entity_id.is_not(None))
+            )
+        ).fetchall()
 
     atom_aliases: dict[int, list[str]] = {}
     for row in alias_rows:

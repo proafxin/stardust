@@ -1,6 +1,6 @@
 from collections.abc import AsyncGenerator
 
-from stardust.config import LLM_BATCH_TOKEN_LIMIT, NUMERIC_ENTITY_TYPES
+from stardust.config import LLM_BATCH_TOKEN_LIMIT
 from stardust.registry import llm_tokenizer
 
 _PREAMBLE = (
@@ -44,4 +44,3 @@ async def build_batch_prompts(
         atom_counter += 1
     if sections:
         yield _PREAMBLE + "\n\n".join(sections), batch_rows
-
