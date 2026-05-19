@@ -18,6 +18,7 @@ from sqlalchemy.orm import aliased
 from stardust.config import (
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_INTERNAL_BATCH_SIZE,
+    LLM_BATCH_TOKEN_LIMIT,
     NLP_COMMIT_BATCH_SIZE,
     NUMERIC_ENTITY_TYPES,
     UNRESOLVED_TOP_K,
@@ -29,9 +30,7 @@ from stardust.models import Atom, BatchPrompt, CanonicalEntity, Disambiguation, 
 from stardust.parse import (
     _parse_md_tables,
     clean_value,
-    normalize_crag,
     normalize_hotpotqa,
-    normalize_qasper,
 )
 from stardust.query import (
     insert_canonical_entities,
@@ -43,15 +42,17 @@ from stardust.query import (
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_llm_tokenizer, unload_nlp, unload_reranker
+from stardust.registry import llm_tokenizer
 from stardust.resolution.global_resolution import canonicalize_by_type
 from stardust.resolution.local import build_batch_prompts
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 _UNRESOLVED_PREAMBLE = (
-    "Given an unresolved nominal token and a list of candidate named entities with context, "
-    "output the token_id of the named entity this nominal refers to, or null if none apply.\n"
-    'Output a single JSON object: {"referent_id": <token_id or null>}\n\n'
+    "Given a list of unresolved nominal tokens, each with candidate named entities and context, "
+    "output a single JSON object mapping each token_id to the token_id of the named entity it refers to. "
+    "Only include token_ids you can confidently resolve. Omit tokens with no clear referent.\n"
+    'Example: {"12": 45, "33": 45}\n\n'
 )
 
 DATA_DIR = Path("data")
@@ -67,8 +68,6 @@ PARQUET_BATCH_SIZE = 10_000
 
 _NORMALIZER_MAP = {
     "hotpotqa": normalize_hotpotqa,
-    "qasper": normalize_qasper,
-    "crag_open": normalize_crag,
 }
 
 
@@ -263,6 +262,7 @@ async def phase_unresolved() -> None:
         unresolved_rows = (
             await session.execute(
                 select(Token.id, Token.atom_id, Token.text, Token.context)
+                .where(Token.pos == "PRON")
                 .outerjoin(Disambiguation, Disambiguation.token_id == Token.id)
                 .where(Disambiguation.id.is_(None))
             )
@@ -289,52 +289,79 @@ async def phase_unresolved() -> None:
     ne_vecs = embedder.encode(
         ne_contexts, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE, normalize_embeddings=True, show_progress_bar=False
     )
-
     index = faiss.IndexFlatIP(ne_vecs.shape[1])
     index.add(ne_vecs.astype(np.float32))
 
     unresolved_contexts = [r.context for r in unresolved_rows]
     unresolved_vecs = embedder.encode(
-        unresolved_contexts,
-        batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
-        normalize_embeddings=True,
-        show_progress_bar=False,
+        unresolved_contexts, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE, normalize_embeddings=True, show_progress_bar=False
     )
 
     k = min(UNRESOLVED_TOP_K, len(named_entity_rows))
     distances, indices = index.search(unresolved_vecs.astype(np.float32), k)
 
-    i = 0
-    async with SessionLocal() as session:
-        for unresolved, dists, idxs in zip(unresolved_rows, distances, indices, strict=False):
-            candidates = [named_entity_rows[j] for j, d in zip(idxs, dists, strict=False) if d > 0.5]
-            if not candidates:
+    tokenizer = llm_tokenizer()
+    preamble_tokens = len(tokenizer.encode(_UNRESOLVED_PREAMBLE, add_special_tokens=False))
+    budget = LLM_BATCH_TOKEN_LIMIT - preamble_tokens
+
+    # build (unresolved_row, candidates_str) pairs, skipping those with no candidates
+    candidates_per_token: list[tuple[Token, str]] = []
+    for unresolved, dists, idxs in zip(unresolved_rows, distances, indices, strict=False):
+        candidates = [named_entity_rows[j] for j, d in zip(idxs, dists, strict=False) if d > 0.5]
+        if not candidates:
+            continue
+        candidates_str = ", ".join(f"{c.id}:{c.text} ({c.context})" for c in candidates)
+        candidates_per_token.append((unresolved, candidates_str))
+
+    resolved = 0
+    batch_no = 0
+    batch: list[tuple[Token, str]] = []
+    batch_tokens = 0
+
+    async def _flush(b: list[tuple[Token, str]], bn: int) -> int:
+        section = "\n".join(f"Token {u.id}:{u.text} ({u.context}) | candidates: {cs}" for u, cs in b)
+        prompt = _UNRESOLVED_PREAMBLE + section
+        raw = await ollama_complete(prompt, max_tokens=max(100, len(b) * 20))
+        try:
+            start, end = raw.find("{"), raw.rfind("}") + 1
+            result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
+        except json.JSONDecodeError:
+            log.warning("phase 3.6: batch %d failed to parse: %s", bn, raw[:200])
+            return 0
+        rows = []
+        for u, _ in b:
+            referent_id = result.get(str(u.id))
+            if referent_id is None or not isinstance(referent_id, int):
                 continue
-            candidates_str = ", ".join(f"{c.id}:{c.text} ({c.context})" for c in candidates)
-            prompt = (
-                _UNRESOLVED_PREAMBLE
-                + f"Token {unresolved.id}:{unresolved.text} ({unresolved.context})\nCandidates: {candidates_str}"
-            )
-            raw = await ollama_complete(prompt, max_tokens=50)
-            try:
-                start, end = raw.find("{"), raw.rfind("}") + 1
-                result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
-                referent_id = result.get("referent_id")
-                if referent_id is not None and isinstance(referent_id, int):
-                    await session.execute(
-                        insert(Disambiguation).values(
-                            token_id=unresolved.id,
-                            referent_id=referent_id,
-                            canonical_token_id=referent_id,
-                            atom_id=unresolved.atom_id,
-                            confidence=float(dists[0]),
-                        )
-                    )
-                    i += 1
-            except (json.JSONDecodeError, ValueError):
-                pass
-        await session.commit()
-    log.info("phase 3.6: resolved %d unresolved nominals", i)
+            rows.append({
+                "token_id": u.id,
+                "referent_id": referent_id,
+                "canonical_token_id": referent_id,
+                "atom_id": u.atom_id,
+                "confidence": 0.5,
+            })
+        if rows:
+            async with SessionLocal() as session:
+                await session.execute(insert(Disambiguation), rows)
+                await session.commit()
+        log.info("phase 3.6: batch %d done, resolved %d/%d", bn, len(rows), len(b))
+        return len(rows)
+
+    for unresolved, candidates_str in candidates_per_token:
+        line = f"Token {unresolved.id}:{unresolved.text} ({unresolved.context}) | candidates: {candidates_str}"
+        line_tokens = len(tokenizer.encode(line, add_special_tokens=False))
+        if batch and batch_tokens + line_tokens > budget:
+            resolved += await _flush(batch, batch_no)
+            batch = []
+            batch_tokens = 0
+            batch_no += 1
+        batch.append((unresolved, candidates_str))
+        batch_tokens += line_tokens
+
+    if batch:
+        resolved += await _flush(batch, batch_no)
+
+    log.info("phase 3.6: resolved %d unresolved nominals", resolved)
 
 
 # ── Phase 4: Global canonicalization ─────────────────────────────────────────
