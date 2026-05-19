@@ -14,6 +14,7 @@ from mistletoe.ast_renderer import AstRenderer
 from stardust.config import ATOM_TOKEN_LIMIT
 from stardust.index import OffsetMap
 from stardust.registry import embedder
+from stardust.tree.atom import Modality, Node, SpanOffset
 
 
 def clean_value(value: str) -> str:
