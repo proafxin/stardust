@@ -15,6 +15,7 @@ from sqlalchemy import select, text, update
 
 from stardust.config import (
     ATOM_TOKEN_LIMIT,
+    EMBEDDING_BATCH_SIZE,
     EMBEDDING_INTERNAL_BATCH_SIZE,
     NLP_COMMIT_BATCH_SIZE,
     settings,
@@ -372,90 +373,102 @@ async def phase_llm() -> None:
 # ── Phase 4: Disambiguation + embedding ─────────────────────────────────────
 
 
-async def _process_record_disambiguation(record_id: str) -> tuple[str, list]:
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(AtomModel.id, AtomModel.nlp_attributes, AtomModel.disambiguation).where(
-                AtomModel.record_id == record_id
-            )
+async def _collect_entity_mentions() -> list[tuple[str, list]]:
+    per_record: dict[str, list] = {}
+    async with SessionLocal() as session, session.begin():
+        stream = await session.stream(
+            select(AtomModel.id, AtomModel.record_id, AtomModel.nlp_attributes, AtomModel.disambiguation)
         )
-        rows = [(r.id, r.nlp_attributes, r.disambiguation) for r in result.fetchall()]
-    return record_id, collect_entity_mentions(record_id, rows)
+        async for row in stream:
+            if row.record_id not in per_record:
+                per_record[row.record_id] = []
+            per_record[row.record_id].append((row.id, row.nlp_attributes, row.disambiguation))
+    return [
+        (record_id, collect_entity_mentions(record_id, rows))
+        for record_id, rows in per_record.items()
+    ]
+
+
+async def _stream_atom_texts(atom_ids: set[int]) -> dict[int, str]:
+    atom_texts: dict[int, str] = {}
+    async with SessionLocal() as session, session.begin():
+        stream = await session.stream(
+            select(AtomModel.id, AtomModel.value).where(AtomModel.id.in_(atom_ids))
+        )
+        async for row in stream:
+            atom_texts[row.id] = clean_value(row.value)
+    return atom_texts
 
 
 async def phase_disambiguation() -> None:
     log.info("phase 4: disambiguation + embedding")
 
-    async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel.record_id).distinct())
-        record_ids = [r.record_id for r in result.fetchall()]
-
-    per_record = list(await asyncio.gather(*[_process_record_disambiguation(record_id) for record_id in record_ids]))
+    per_record = await _collect_entity_mentions()
+    needed_atom_ids = {atom_id for _, mentions in per_record for _, _, atom_id, _, _ in mentions}
+    atom_texts = await _stream_atom_texts(needed_atom_ids)
 
     log.info("before merge_across_records: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(AtomModel.id, AtomModel.value, AtomModel.value_hash, AtomModel.disambiguation)
-        )
-        rows = result.fetchall()
-
-    atom_texts = {r.id: clean_value(r.value) for r in rows}
-
     global_entities = await merge_across_records(per_record, atom_texts)
+    del atom_texts
     log.info("phase 4: %d canonical entities", len(global_entities))
 
-    # build atom_id -> alias union map for enrichment
     atom_aliases: dict[int, list[str]] = {}
     for entity in global_entities:
         for _, _, atom_id, _ in entity.mentions:
             atom_aliases.setdefault(atom_id, []).extend(entity.aliases)
 
-    def _content(value: str) -> str:
-        return clean_value(value)
-
-    coref_map: dict[int, list[str]] = {}
-    for r in rows:
-        if not r.disambiguation:
-            continue
-        referents = [e["referent"] for e in r.disambiguation.get("pronoun_map", []) if e.get("referent")]
-        if referents:
-            coref_map[r.id] = referents
-
-    def _enrich(r) -> str:
-        parts = [_content(r.value)]
-        if r.id in atom_aliases:
-            parts.append(" ".join(atom_aliases[r.id]))
-        if r.id in coref_map:
-            parts.append(" ".join(coref_map[r.id]))
-        return " ".join(parts)
-
-    texts = [_enrich(r) for r in rows]
-    total = len(rows)
-
-    existing_hashes = {r.id: r.value_hash for r in rows}
-    new_hashes = {r.id: hashlib.sha256(texts[i].encode()).hexdigest() for i, r in enumerate(rows)}
-    stale = [i for i, r in enumerate(rows) if new_hashes[r.id] != existing_hashes.get(r.id)]
-
-    if stale:
-        stale_texts = [texts[i] for i in stale]
-        stale_vecs = load_embedder().encode(
-            stale_texts,
-            batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
-            normalize_embeddings=True,
-            show_progress_bar=False,
+    async with SessionLocal() as session, session.begin():
+        coref_stream = await session.stream(
+            select(AtomModel.id, AtomModel.disambiguation).where(AtomModel.disambiguation.is_not(None))
         )
-        async with SessionLocal() as session:
-            for idx, vec in zip(stale, stale_vecs, strict=False):
-                r = rows[idx]
-                await session.execute(
-                    update(AtomModel)
-                    .where(AtomModel.id == r.id)
-                    .values(embedding=vec.tolist(), value=texts[idx], value_hash=new_hashes[r.id])
-                )
-            await session.commit()
+        coref_map: dict[int, list[str]] = {}
+        async for row in coref_stream:
+            referents = [e["referent"] for e in row.disambiguation.get("pronoun_map", []) if e.get("referent")]
+            if referents:
+                coref_map[row.id] = referents
 
-    log.info("phase 4: embedded %d/%d atoms (skipped %d)", len(stale), total, total - len(stale))
+    embedder = load_embedder()
+    done = stale = 0
+    async with SessionLocal() as read_session, read_session.begin():
+        stream = await read_session.stream(
+            select(AtomModel.id, AtomModel.value, AtomModel.value_hash).execution_options(yield_per=EMBEDDING_BATCH_SIZE)
+        )
+        async for partition in stream.partitions(EMBEDDING_BATCH_SIZE):
+            texts, ids, hashes = [], [], []
+            for row in partition:
+                parts = [clean_value(row.value)]
+                if row.id in atom_aliases:
+                    parts.append(" ".join(atom_aliases[row.id]))
+                if row.id in coref_map:
+                    parts.append(" ".join(coref_map[row.id]))
+                enriched = " ".join(parts)
+                new_hash = hashlib.sha256(enriched.encode()).hexdigest()
+                texts.append(enriched)
+                ids.append(row.id)
+                hashes.append((row.value_hash, new_hash))
+            stale_idx = [i for i, (old, new) in enumerate(hashes) if old != new]
+            if stale_idx:
+                stale_texts = [texts[i] for i in stale_idx]
+                vecs = embedder.encode(
+                    stale_texts,
+                    batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                async with SessionLocal() as write_session:
+                    for i, vec in zip(stale_idx, vecs, strict=False):
+                        await write_session.execute(
+                            update(AtomModel)
+                            .where(AtomModel.id == ids[i])
+                            .values(embedding=vec.tolist(), value=texts[i], value_hash=hashes[i][1])
+                        )
+                    await write_session.commit()
+            stale += len(stale_idx)
+            done += len(partition)
+            log.info("phase 4: embedded %d/%d atoms", done, done)
+
+    log.info("phase 4: embedded %d stale atoms", stale)
 
     async with SessionLocal() as session:
         await insert_canonical_entities(global_entities, "global", session)
