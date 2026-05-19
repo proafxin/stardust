@@ -181,18 +181,20 @@ def _disambiguate(
 
         for global_cluster in global_clusters:
             merged: list[tuple[str, SpanOffset, int, str]] = []
+            merged_norms: set[str] = set()
             for local_idx in global_cluster:
                 rep_i = rep_indices[local_idx]
                 for mention_idx in groups[uf.find(rep_i)]:
                     surface, offset, atom_id, record_id, _ = mentions[mention_idx]
                     merged.append((surface, offset, atom_id, record_id))
+                    merged_norms.add(norms[mention_idx])
             freq: dict[str, int] = defaultdict(int)
             for surface, _, _, _ in merged:
                 freq[surface] += 1
             canonical_name = max(freq, key=lambda s: (freq[s], len(s)))
             entity = CanonicalEntity(canonical_type, merged)
             entity.canonical_name = canonical_name
-            entity.aliases = list({m[0] for m in merged})
+            entity.aliases = list(merged_norms - {""})
             global_entities.append(entity)
 
     return global_entities
