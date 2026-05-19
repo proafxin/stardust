@@ -316,7 +316,7 @@ async def normalize_crag(record: dict[str, Any]) -> AsyncGenerator[ParsedNode]:
                 len(text),
                 state.clean_pos,
                 len(sec_clean),
-                page_node.id,
+                page_node.transient_id,
             )
             current_section_id = sec_node.transient_id
             state.counter += 1
