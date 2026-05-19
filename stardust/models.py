@@ -43,7 +43,7 @@ class Atom(Base):
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
     nlp_attributes: Mapped[list] = mapped_column(JSONB, default=[])
-    disambiguation: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    disambiguation: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default='{"pronoun_map": []}')
     value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
 

@@ -272,7 +272,7 @@ async def phase_disambiguation() -> None:
 
     async with SessionLocal() as session, session.begin():
         coref_stream = await session.stream(
-            select(Atom.id, Atom.disambiguation).where(Atom.disambiguation != cast({}, JSONB))
+            select(Atom.id, Atom.disambiguation).where(Atom.disambiguation != cast("{}", JSONB))
         )
         coref_map: dict[int, list[str]] = {}
         async for row in coref_stream:
