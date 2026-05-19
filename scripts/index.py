@@ -26,6 +26,7 @@ from stardust.models import AtomModel, LLMPromptModel
 from stardust.parse import _token_count, clean_value, normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
+from stardust.registry import llm_tokenizer as load_llm_tokenizer
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_nlp
 from stardust.resolution.global_resolution import merge_across_records
@@ -41,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path("data")
-N = 100  # 0 = no limit
+N = 200  # 0 = no limit
 
 DATASETS: list[tuple[str, Path, str]] = [
     ("hotpotqa", DATA_DIR / "hotpotqa" / "corpus.parquet", "hotpotqa"),
@@ -342,10 +343,20 @@ async def phase_llm() -> None:
         )
         rows = result.fetchall()
 
-    # build token-budget batches, skip already-disambiguated atoms
+    tokenizer = load_llm_tokenizer()
+    prompt_overhead = len(tokenizer.encode(
+        "Resolve coreference. Output a single JSON object mapping token_id to referent_token_id. "
+        "Only include pronouns or nominals that clearly refer to another token. "
+        "Do not map predicate nominals or role descriptions.\n"
+        "Example: [0] Sarah joined the firm. She became partner.\ntokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
+        "[1] The treaty was signed by France. It came into force.\ntokens: 4:treaty, 5:France, 6:It\n"
+        '=> {"2":0,"6":4}'
+    ))
+
     batches: list[list[tuple[int, str, list]]] = []
     current: list[tuple[int, str, list]] = []
-    current_tokens = 0
+    current_tokens = prompt_overhead
+    nominal_counter = 0
     for row in rows:
         if row.disambiguation is not None:
             continue
@@ -353,13 +364,21 @@ async def phase_llm() -> None:
         entry = build_pronoun_prompt(row.id, row.value, attrs)
         if not entry:
             continue
-        tokens = _token_count(entry["text"] + " ".join(f"{current_tokens + j}:{t.text}" for j, t in enumerate(entry["nominals"])))
-        if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT and current:
-            batches.append(current)
-            current, current_tokens = [(row.id, row.value, row.nlp_attributes)], tokens
+        atom_str = (
+            f"[{len(current)}] {entry['text']}\n"
+            f"tokens: {', '.join(f'{nominal_counter + j}:{t.text}' for j, t in enumerate(entry['nominals']))}"
+        )
+        tokens = len(tokenizer.encode(atom_str))
+        if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT:
+            if current:
+                batches.append(current)
+            current = [(row.id, row.value, row.nlp_attributes)]
+            current_tokens = prompt_overhead + tokens
+            nominal_counter = len(entry["nominals"])
         else:
             current.append((row.id, row.value, row.nlp_attributes))
             current_tokens += tokens
+            nominal_counter += len(entry["nominals"])
     if current:
         batches.append(current)
 

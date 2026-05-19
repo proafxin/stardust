@@ -127,5 +127,5 @@ def build_batch_prompt(atom_data: list[dict]) -> str:
         "Example: [0] Sarah joined the firm. She became partner.\ntokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
         "[1] The treaty was signed by France. It came into force.\ntokens: 4:treaty, 5:France, 6:It\n"
         '=> {"2":0,"6":4}\n\n'
-        f"{body}\n=>"
+        f"{body}"
     )
