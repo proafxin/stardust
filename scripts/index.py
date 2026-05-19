@@ -178,18 +178,6 @@ async def phase_nlp_embed() -> None:
     log.info("phase 2: hnsw index created")
     log.info("phase 2: done")
 
-    async with SessionLocal() as session:
-        await session.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_atoms_embedding ON atoms "
-                "USING hnsw (embedding vector_cosine_ops) "
-                "WITH (m = 16, ef_construction = 64)"
-            )
-        )
-        await session.commit()
-    log.info("phase 3: hnsw index created")
-    log.info("phase 3: done")
-
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
