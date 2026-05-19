@@ -356,9 +356,10 @@ async def phase_llm() -> None:
         tokens = len(entry["text"].split()) + len(entry["nominals"]) * 2
         if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT and current:
             batches.append(current)
-            current, current_tokens = [], 0
-        current.append((row.id, row.value, row.nlp_attributes))
-        current_tokens += tokens
+            current, current_tokens = [(row.id, row.value, row.nlp_attributes)], tokens
+        else:
+            current.append((row.id, row.value, row.nlp_attributes))
+            current_tokens += tokens
     if current:
         batches.append(current)
 

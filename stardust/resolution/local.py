@@ -112,19 +112,19 @@ def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes])
 def build_batch_prompt(atom_data: list[dict]) -> str:
     if not atom_data:
         return ""
-    texts = "\n\n".join(a["text"] for a in atom_data)
     token_counter = 0
-    tokens = []
-    for a in atom_data:
-        for t in a["nominals"]:
-            tokens.append(f"{token_counter}:{t.text}")
-            token_counter += 1
-    examples = (
-        "Sarah joined the firm. She became partner.\n\nThe treaty was signed by France. It came into force.\n\n"
-        "tokens: 0:Sarah, 1:firm, 2:She, 3:partner, 4:treaty, 5:France, 6:It\n"
-        '=> {"2":0,"3":1,"6":4}'
-    )
+    sections: list[str] = []
+    for i, a in enumerate(atom_data):
+        tokens = [f"{token_counter + j}:{t.text}" for j, t in enumerate(a["nominals"])]
+        token_counter += len(a["nominals"])
+        sections.append(f"[{i}] {a['text']}\ntokens: {', '.join(tokens)}")
+    body = "\n\n".join(sections)
     return (
-        "Resolve coreference. Output a JSON object mapping token_id to referent_token_id. Only include tokens where a clear referent exists.\n\n"
-        f"{examples}\n\n{texts}\n\ntokens: {', '.join(tokens)}\n=>"
+        "Resolve coreference. Output a single JSON object mapping token_id to referent_token_id. "
+        "Only include pronouns or nominals that clearly refer to another token. "
+        "Do not map predicate nominals or role descriptions.\n"
+        "Example: [0] Sarah joined the firm. She became partner.\ntokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
+        "[1] The treaty was signed by France. It came into force.\ntokens: 4:treaty, 5:France, 6:It\n"
+        '=> {"2":0,"6":4}\n\n'
+        f"{body}\n=>"
     )
