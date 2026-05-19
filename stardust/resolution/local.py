@@ -1,4 +1,7 @@
-from stardust.config import NUMERIC_ENTITY_TYPES
+from collections.abc import Generator
+
+from stardust.config import LLM_BATCH_TOKEN_LIMIT, NUMERIC_ENTITY_TYPES
+from stardust.registry import llm_tokenizer
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
 
@@ -101,31 +104,45 @@ def attach_pronoun_resolutions(index: AtomIndex, pronoun_map: list[dict]) -> Non
         )
 
 
-def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes]) -> dict | None:
-    leaf_start = value.rfind(" | ") + 3 if " | " in value else 0
-    nominals = [a for a in _nominal_spans(attrs) if a.offset.start >= leaf_start]
-    if not nominals:
-        return None
-    leaf = value.rsplit(" | ", 1)[-1] if " | " in value else value
-    return {"atom_id": atom_id, "text": leaf, "nominals": nominals}
+_PREAMBLE = (
+    "Resolve coreference. Output a single JSON object mapping token_id to referent_token_id. "
+    "Only include pronouns or nominals that clearly refer to another token. "
+    "Do not map predicate nominals or role descriptions.\n"
+    "Example: [0] Sarah joined the firm. She became partner.\ntokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
+    "[1] The treaty was signed by France. It came into force.\ntokens: 4:treaty, 5:France, 6:It\n"
+    '=> {"2":0,"6":4}\n\n'
+)
 
 
-def build_batch_prompt(atom_data: list[dict]) -> str:
-    if not atom_data:
-        return ""
-    token_counter = 0
+def build_batch_prompts(index: AtomIndex) -> Generator[str, None, None]:
+    tokenizer = llm_tokenizer()
+    preamble_tokens = len(tokenizer.encode(_PREAMBLE, add_special_tokens=False))
+    budget = LLM_BATCH_TOKEN_LIMIT - preamble_tokens
     sections: list[str] = []
-    for i, a in enumerate(atom_data):
-        tokens = [f"{token_counter + j}:{t.text}" for j, t in enumerate(a["nominals"])]
-        token_counter += len(a["nominals"])
-        sections.append(f"[{i}] {a['text']}\ntokens: {', '.join(tokens)}")
-    body = "\n\n".join(sections)
-    return (
-        "Resolve coreference. Output a single JSON object mapping token_id to referent_token_id. "
-        "Only include pronouns or nominals that clearly refer to another token. "
-        "Do not map predicate nominals or role descriptions.\n"
-        "Example: [0] Sarah joined the firm. She became partner.\ntokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
-        "[1] The treaty was signed by France. It came into force.\ntokens: 4:treaty, 5:France, 6:It\n"
-        '=> {"2":0,"6":4}\n\n'
-        f"{body}"
-    )
+    batch_tokens = 0
+    atom_counter = 0
+    token_counter = 0
+    for atom_id in index.atoms:
+        node = index.nodes[atom_id]
+        nominals = _nominal_spans(node.nlp_attributes)
+        if not nominals:
+            continue
+        leaf = node.value.rsplit(" | ", 1)[-1] if " | " in node.value else node.value
+        tokens_str = ", ".join(f"{token_counter + j}:{t.text}" for j, t in enumerate(nominals))
+        section = f"[{atom_counter}] {leaf}\ntokens: {tokens_str}"
+        section_tokens = len(tokenizer.encode(section, add_special_tokens=False))
+        if sections and batch_tokens + section_tokens > budget:
+            yield _PREAMBLE + "\n\n".join(sections)
+            sections = []
+            batch_tokens = 0
+            atom_counter = 0
+            token_counter = 0
+            tokens_str = ", ".join(f"{j}:{t.text}" for j, t in enumerate(nominals))
+            section = f"[0] {leaf}\ntokens: {tokens_str}"
+            section_tokens = len(tokenizer.encode(section, add_special_tokens=False))
+        sections.append(section)
+        batch_tokens += section_tokens
+        atom_counter += 1
+        token_counter += len(nominals)
+    if sections:
+        yield _PREAMBLE + "\n\n".join(sections)
