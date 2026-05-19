@@ -16,7 +16,6 @@ from sqlalchemy import insert, select, text, update
 from sqlalchemy.orm import aliased
 
 from stardust.config import (
-    ATOM_TOKEN_LIMIT,
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_INTERNAL_BATCH_SIZE,
     NLP_COMMIT_BATCH_SIZE,
@@ -29,7 +28,6 @@ from stardust.llm import ollama_complete, ollama_unload
 from stardust.models import Atom, BatchPrompt, CanonicalEntity, Disambiguation, Token
 from stardust.parse import (
     _parse_md_tables,
-    _token_count,
     clean_value,
     normalize_crag,
     normalize_hotpotqa,
@@ -47,8 +45,6 @@ from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_llm_tokenizer, unload_nlp, unload_reranker
 from stardust.resolution.global_resolution import canonicalize_by_type
 from stardust.resolution.local import build_batch_prompts
-from stardust.tree.atom import Node
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -63,8 +59,8 @@ N = 200  # 0 = no limit
 
 DATASETS: list[tuple[str, Path, str]] = [
     ("hotpotqa", DATA_DIR / "hotpotqa" / "corpus.parquet", "hotpotqa"),
-    # ("qasper", DATA_DIR / "qasper" / "train.parquet", "qasper"),  # TODO: fix chunking
-    ("crag_open", DATA_DIR / "crag" / "open" / "train.parquet", "crag_open"),
+    # ("qasper", DATA_DIR / "qasper" / "train.parquet", "qasper"),
+    # ("crag_open", DATA_DIR / "crag" / "open" / "train.parquet", "crag_open"),
 ]
 
 PARQUET_BATCH_SIZE = 10_000
@@ -76,17 +72,8 @@ _NORMALIZER_MAP = {
 }
 
 
-async def _flush_atom_buffer(buf_values: list[str], buf_node: Node, record_id: str) -> None:
-    bundled = buf_node.model_copy(update={"value": " ".join(buf_values)})
-    async with SessionLocal() as session:
-        await insert_index([(record_id, [bundled], [0])], session)
-    buf_values.clear()
-
-
 async def phase_normalize() -> None:
     log.info("phase 1: normalize + persist")
-    buf_values: list[str] = []
-    buf_node: Node | None = None
     done = 0
 
     for dataset, parquet_path, id_prefix in DATASETS:
@@ -96,7 +83,7 @@ async def phase_normalize() -> None:
                 if N and i >= N:
                     break
                 record_id = f"{id_prefix}_{i}"
-                parsed_nodes: list[Any] = [p async for p in _NORMALIZER_MAP[id_prefix](record)]
+                parsed_nodes: list[Any] = [p async for p in _NORMALIZER_MAP[id_prefix](record, record_id)]
                 if not parsed_nodes:
                     i += 1
                     continue
@@ -126,24 +113,11 @@ async def phase_normalize() -> None:
                                 await insert_table_rows(rows, session)
                             await session.commit()
 
-                for p in atoms:
-                    node = p.node
-                    if buf_values and _token_count(" ".join([*buf_values, node.value])) > ATOM_TOKEN_LIMIT:
-                        await _flush_atom_buffer(buf_values, buf_node, record_id)
-                        buf_node = None
-                    buf_values.append(node.value)
-                    buf_node = node.model_copy(update={"parent_index": None})
-                    if _token_count(" ".join(buf_values)) >= ATOM_TOKEN_LIMIT:
-                        await _flush_atom_buffer(buf_values, buf_node, record_id)
-                        buf_node = None
                 i += 1
                 done += 1
             if N and i >= N:
                 break
         log.info("phase 1: %s done (%d records)", dataset, i)
-
-    if buf_values and buf_node is not None:
-        await _flush_atom_buffer(buf_values, buf_node, "bundled")
 
     log.info("phase 1: done (%d total records)", done)
 

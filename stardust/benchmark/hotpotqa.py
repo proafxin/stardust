@@ -1,46 +1,70 @@
 import asyncio
+import json
 import logging
-
-from datasets import load_dataset
+from pathlib import Path
 
 from stardust.benchmark.eval import aggregate_metrics, compute_metrics
-from stardust.db import get_session
+from stardust.db import SessionLocal
 from stardust.query import retrieve
 
 log = logging.getLogger(__name__)
 
-SPLIT = "train"
-N = 100
+DEV_PATH = Path("data/hotpotqa/hotpot_dev_distractor_v1.json")
+PRED_PATH = Path("data/hotpotqa/predictions.json")
+N = 0
+TOP_K = 10
 
 
-def _relevant_doc_ids(record: dict) -> set[str]:
-    return {f"hotpotqa_{title}" for title in record["supporting_facts"]["title"]}
+async def _process(record: dict) -> tuple[str, str, list, dict[str, float] | None]:
+    qid = record["_id"]
+    question = record["question"]
+    supporting = {(title, sent_idx) for title, sent_idx in record["supporting_facts"]}
+    context_map = {title: sents for title, sents in record["context"]}
 
+    async with SessionLocal() as session:
+        results = await retrieve(question, session, top_k=TOP_K, rerank_top_k=TOP_K)
 
-async def _process(record: dict, i: int) -> dict[str, float] | None:
-    async for session in get_session():
-        results = await retrieve(record["question"], session, top_k=10, rerank_top_k=10)
-    if not results:
-        return None
-    relevant = {r.id for r in results if any(title in r.value for title in record["supporting_facts"]["title"])}
-    if not relevant:
-        log.warning("no relevant atoms for record %d, skipping", i)
-        return None
-    retrieved = [r.id for r in results]
-    m = compute_metrics(relevant, retrieved)
-    log.info("[%d] %s | %s", i, record["question"][:80], {k: f"{v:.3f}" for k, v in m.items()})
-    return m
+    sp_pred: list[list] = []
+    relevant: set[int] = set()
+
+    for r in results:
+        for title, sent_idx in supporting:
+            if title not in r.value:
+                continue
+            sents = context_map.get(title, [])
+            if sent_idx < len(sents) and sents[sent_idx].strip() in r.value:
+                if [title, sent_idx] not in sp_pred:
+                    sp_pred.append([title, sent_idx])
+                relevant.add(r.id)
+
+    metrics = compute_metrics(relevant, [r.id for r in results]) if relevant else None
+    return qid, "n/a", sp_pred, metrics
 
 
 async def run_async() -> dict:
-    ds = load_dataset("hotpot_qa", "fullwiki", split=SPLIT)  # nosec B615
+    with open(DEV_PATH) as f:
+        dev = json.load(f)
     if N:
-        ds = ds.select(range(N))
-    results = await asyncio.gather(*[_process(record, i) for i, record in enumerate(ds)])
-    all_metrics = [m for m in results if m is not None]
-    metrics = {**aggregate_metrics(all_metrics), "n": len(all_metrics)}
-    log.info("HotpotQA results: %s", metrics)
-    return metrics
+        dev = dev[:N]
+
+    results = await asyncio.gather(*[_process(record) for record in dev])
+
+    answer_pred: dict[str, str] = {}
+    sp_pred: dict[str, list] = {}
+    all_metrics: list[dict[str, float]] = []
+
+    for qid, answer, sp, metrics in results:
+        answer_pred[qid] = answer
+        sp_pred[qid] = sp
+        if metrics:
+            all_metrics.append(metrics)
+
+    PRED_PATH.write_text(json.dumps({"answer": answer_pred, "sp": sp_pred}))
+    log.info("predictions written to %s", PRED_PATH)
+
+    agg = {**aggregate_metrics(all_metrics), "n": len(all_metrics)}
+    log.info("HotpotQA SP retrieval: %s", agg)
+    return agg
 
 
 def run() -> dict:
