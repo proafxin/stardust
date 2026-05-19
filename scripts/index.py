@@ -123,7 +123,8 @@ async def phase_nlp_embed() -> None:
             for (_, _, raw_text) in sents:
                 all_embed_texts.append(f"{ancestry} | {raw_text}" if ancestry else raw_text)
 
-        vecs = embed_sentences(all_embed_texts, embedder)
+        vecs_list = [embed_sentences(all_embed_texts[i:i + EMBEDDING_INTERNAL_BATCH_SIZE], embedder) for i in range(0, len(all_embed_texts), EMBEDDING_INTERNAL_BATCH_SIZE)]
+        vecs = np.concatenate(vecs_list, axis=0)
 
         vec_idx = 0
         sent_vecs_map: dict[int, np.ndarray] = {}
