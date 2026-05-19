@@ -25,14 +25,11 @@ _INSERT_CHUNK = 3_000
 
 
 async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: AsyncSession) -> None:
-    for record_id, nodes, atom_transient_ids in docs:
-        atom_set = set(atom_transient_ids)
-        # insert in order (parse yields parents before children)
-        transient_to_db: dict[int, int] = {}
-        for node in nodes:
-            db_parent_id = (
-                transient_to_db.get(node.transient_parent_id) if node.transient_parent_id is not None else None
-            )
+    for record_id, nodes, atom_indices in docs:
+        atom_set = set(atom_indices)
+        db_ids: list[int] = []
+        for i, node in enumerate(nodes):
+            db_parent_id = db_ids[node.parent_index] if node.parent_index is not None else None
             result = await session.execute(
                 insert(TreeNode)
                 .values(
@@ -49,8 +46,8 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                 .returning(TreeNode.id)
             )
             db_id = result.scalar_one()
-            transient_to_db[node.transient_id] = db_id
-            if node.transient_id in atom_set:
+            db_ids.append(db_id)
+            if i in atom_set:
                 await session.execute(
                     insert(Atom).values(
                         id=db_id,

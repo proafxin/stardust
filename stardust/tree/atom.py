@@ -34,8 +34,7 @@ class DisambiguationMetadata(BaseModel):
 
 
 class Node(BaseModel):
-    transient_id: int
-    transient_parent_id: int | None
+    parent_index: int | None
     node_type: str
     modality: Modality
     value: str

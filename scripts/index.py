@@ -61,7 +61,7 @@ _NORMALIZER_MAP = {
 async def _flush_atom_buffer(buf_values: list[str], buf_node: Node, record_id: str) -> None:
     bundled = buf_node.model_copy(update={"value": " ".join(buf_values)})
     async with SessionLocal() as session:
-        await insert_index([(record_id, [bundled], [bundled.transient_id])], session)
+        await insert_index([(record_id, [bundled], [0])], session)
     buf_values.clear()
 
 
@@ -84,16 +84,17 @@ async def phase_normalize() -> None:
                     continue
                 non_atoms = [p.node for p in parsed_nodes if not p.is_atom]
                 atoms = [p.node for p in parsed_nodes if p.is_atom]
-                atom_transient_ids = [n.transient_id for n in atoms]
-                if non_atoms or atoms:
+                all_nodes = non_atoms + atoms
+                atom_indices = [len(non_atoms) + i for i in range(len(atoms))]
+                if all_nodes:
                     async with SessionLocal() as session:
-                        await insert_index([(record_id, non_atoms + atoms, atom_transient_ids)], session)
+                        await insert_index([(record_id, all_nodes, atom_indices)], session)
                 for node in atoms:
                     if buf_values and _token_count(" ".join([*buf_values, node.value])) > ATOM_TOKEN_LIMIT:
                         await _flush_atom_buffer(buf_values, buf_node, record_id)
                         buf_node = None
                     buf_values.append(node.value)
-                    buf_node = node.model_copy(update={"transient_parent_id": None})
+                    buf_node = node.model_copy(update={"parent_index": None})
                     if _token_count(" ".join(buf_values)) >= ATOM_TOKEN_LIMIT:
                         await _flush_atom_buffer(buf_values, buf_node, record_id)
                         buf_node = None

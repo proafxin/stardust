@@ -38,7 +38,7 @@ class ParsedNode:
 
 @dataclass
 class _State:
-    counter: int = 0
+    index: int = 0
     raw_pos: int = 0
     clean_pos: int = 0
 
@@ -118,33 +118,28 @@ def _md_blocks(markdown: str) -> list[tuple[str, str]]:
 
 
 def _clean_filename(filename: str) -> str:
-    # strip leading hash prefix: "<hex>-https%3A%2F%2F..."
     s = re.sub(r"^[0-9a-f]{32}-", "", filename)
     s = unquote(s)
-    # extract just the path portion after the domain
     m = re.search(r"https?://[^/]+(/.*)", s)
     if m:
         s = m.group(1)
-    # replace slashes, dashes, underscores with spaces and clean up
     s = re.sub(r"[/_-]+", " ", s)
-    s = re.sub(r"\.[a-z]{2,4}$", "", s)  # strip file extension
+    s = re.sub(r"\.[a-z]{2,4}$", "", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
 def _make_node(
-    nid: int,
     node_type: str,
     value: str,
     raw_start: int,
     raw_len: int,
     clean_start: int,
     clean_len: int,
-    parent_id: int | None,
+    parent_index: int | None,
     terminal: bool = False,
 ) -> Node:
     return Node(
-        transient_id=nid,
-        transient_parent_id=parent_id,
+        parent_index=parent_index,
         node_type=node_type,
         modality=Modality.TEXT,
         value=value,
@@ -160,7 +155,7 @@ async def _flush_buffer(
     buf: list[str],
     node_type: str,
     prefix: str,
-    parent_id: int,
+    parent_index: int | None,
     state: _State,
 ) -> AsyncGenerator[ParsedNode]:
     if not buf:
@@ -168,10 +163,8 @@ async def _flush_buffer(
     combined = " ".join(buf)
     clean_text, _ = _clean(combined)
     value = f"{prefix} | {clean_text}"
-    node = _make_node(
-        state.counter, node_type, value, state.raw_pos, len(combined), state.clean_pos, len(clean_text), parent_id, True
-    )
-    state.counter += 1
+    node = _make_node(node_type, value, state.raw_pos, len(combined), state.clean_pos, len(clean_text), parent_index, True)
+    state.index += 1
     state.raw_pos += len(combined)
     state.clean_pos += len(clean_text)
     yield ParsedNode(node=node, is_atom=True)
@@ -184,48 +177,30 @@ async def normalize_hotpotqa(record: dict[str, Any]) -> AsyncGenerator[ParsedNod
 
     corpus_text = "hotpotqa"
     corpus_clean, _ = _clean(corpus_text)
-    corpus_node = _make_node(
-        state.counter,
-        corpus_level,
-        corpus_clean,
-        state.raw_pos,
-        len(corpus_text),
-        state.clean_pos,
-        len(corpus_clean),
-        None,
-    )
-    state.counter += 1
+    corpus_index = state.index
+    yield ParsedNode(node=_make_node(corpus_level, corpus_clean, state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None), is_atom=False)
+    state.index += 1
     state.raw_pos += len(corpus_text)
     state.clean_pos += len(corpus_clean)
-    yield ParsedNode(node=corpus_node, is_atom=False)
 
     title: str = record.get("title", "") or ""
     text: str = record.get("text", "") or ""
     doc_clean, _ = _clean(title)
     doc_value = f"{corpus_clean} | {doc_clean}"
-    doc_node = _make_node(
-        state.counter,
-        doc_level,
-        doc_value,
-        state.raw_pos,
-        len(title),
-        state.clean_pos,
-        len(doc_clean),
-        corpus_node.transient_id,
-    )
-    state.counter += 1
+    doc_index = state.index
+    yield ParsedNode(node=_make_node(doc_level, doc_value, state.raw_pos, len(title), state.clean_pos, len(doc_clean), corpus_index), is_atom=False)
+    state.index += 1
     state.raw_pos += len(title)
     state.clean_pos += len(doc_clean)
-    yield ParsedNode(node=doc_node, is_atom=False)
 
     buffer: list[str] = []
     content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{doc_value} | ")
     for sentence in (s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()):
         if _buffer_tokens([*buffer, sentence]) > content_limit and buffer:
-            async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.transient_id, state):
+            async for item in _flush_buffer(buffer, atom_level, doc_value, doc_index, state):
                 yield item
         buffer.append(sentence)
-    async for item in _flush_buffer(buffer, atom_level, doc_value, doc_node.transient_id, state):
+    async for item in _flush_buffer(buffer, atom_level, doc_value, doc_index, state):
         yield item
 
 
@@ -237,22 +212,20 @@ async def normalize_qasper(record: dict[str, Any]) -> AsyncGenerator[ParsedNode]
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", context) if s.strip()]
 
     doc_clean, _ = _clean("qasper_paper")
-    doc_node = _make_node(
-        state.counter, doc_level, doc_clean, state.raw_pos, len("qasper_paper"), state.clean_pos, len(doc_clean), None
-    )
-    state.counter += 1
+    doc_index = state.index
+    yield ParsedNode(node=_make_node(doc_level, doc_clean, state.raw_pos, len("qasper_paper"), state.clean_pos, len(doc_clean), None), is_atom=False)
+    state.index += 1
     state.raw_pos += len("qasper_paper")
     state.clean_pos += len(doc_clean)
-    yield ParsedNode(node=doc_node, is_atom=False)
 
     buffer: list[str] = []
     content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{doc_clean} | ")
     for para in sentences:
         if _buffer_tokens([*buffer, para]) > content_limit and buffer:
-            async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.transient_id, state):
+            async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_index, state):
                 yield item
         buffer.append(para)
-    async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_node.transient_id, state):
+    async for item in _flush_buffer(buffer, atom_level, doc_clean, doc_index, state):
         yield item
 
 
@@ -262,20 +235,11 @@ async def normalize_crag(record: dict[str, Any]) -> AsyncGenerator[ParsedNode]:
 
     corpus_text = "crag_open"
     corpus_clean, _ = _clean(corpus_text)
-    corpus_node = _make_node(
-        state.counter,
-        corpus_level,
-        corpus_clean,
-        state.raw_pos,
-        len(corpus_text),
-        state.clean_pos,
-        len(corpus_clean),
-        None,
-    )
-    state.counter += 1
+    corpus_index = state.index
+    yield ParsedNode(node=_make_node(corpus_level, corpus_clean, state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None), is_atom=False)
+    state.index += 1
     state.raw_pos += len(corpus_text)
     state.clean_pos += len(corpus_clean)
-    yield ParsedNode(node=corpus_node, is_atom=False)
 
     content: str = record.get("markdown", "") or ""
     filename: str = (record.get("filename", "") or "")[:200]
@@ -284,26 +248,17 @@ async def normalize_crag(record: dict[str, Any]) -> AsyncGenerator[ParsedNode]:
 
     page_clean, _ = _clean(_clean_filename(filename))
     page_value = f"{corpus_clean} | {page_clean}"
-    page_node = _make_node(
-        state.counter,
-        page_level,
-        page_value,
-        state.raw_pos,
-        len(filename),
-        state.clean_pos,
-        len(page_clean),
-        corpus_node.transient_id,
-    )
-    state.counter += 1
+    page_index = state.index
+    yield ParsedNode(node=_make_node(page_level, page_value, state.raw_pos, len(filename), state.clean_pos, len(page_clean), corpus_index), is_atom=False)
+    state.index += 1
     state.raw_pos += len(filename)
     state.clean_pos += len(page_clean)
-    yield ParsedNode(node=page_node, is_atom=False)
 
     blocks = _md_blocks(content)
     if not blocks:
         return
 
-    current_section_id = page_node.transient_id
+    current_section_index = page_index
     current_section_value = page_value
     buffer: list[str] = []
 
@@ -311,32 +266,22 @@ async def normalize_crag(record: dict[str, Any]) -> AsyncGenerator[ParsedNode]:
         if block_type == "heading":
             sec_clean, _ = _clean(text)
             current_section_value = f"{page_value} | {sec_clean}"
-            sec_node = _make_node(
-                state.counter,
-                section_level,
-                current_section_value,
-                state.raw_pos,
-                len(text),
-                state.clean_pos,
-                len(sec_clean),
-                page_node.transient_id,
-            )
-            current_section_id = sec_node.transient_id
-            state.counter += 1
+            current_section_index = state.index
+            yield ParsedNode(node=_make_node(section_level, current_section_value, state.raw_pos, len(text), state.clean_pos, len(sec_clean), page_index), is_atom=False)
+            state.index += 1
             state.raw_pos += len(text)
             state.clean_pos += len(sec_clean)
-            yield ParsedNode(node=sec_node, is_atom=False)
             content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{current_section_value} | ")
             if _buffer_tokens([*buffer, text]) > content_limit and buffer:
-                async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
+                async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_index, state):
                     yield item
             buffer.append(text)
         else:
             content_limit = ATOM_TOKEN_LIMIT - _token_count(f"{current_section_value} | ")
             if _buffer_tokens([*buffer, text]) > content_limit and buffer:
-                async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
+                async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_index, state):
                     yield item
             buffer.append(text)
 
-    async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_id, state):
+    async for item in _flush_buffer(buffer, atom_level, current_section_value, current_section_index, state):
         yield item

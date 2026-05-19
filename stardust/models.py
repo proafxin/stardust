@@ -29,7 +29,7 @@ class TreeNode(Base):
     disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     children: Mapped[list["TreeNode"]] = relationship("TreeNode", back_populates="parent")
-    parent: Mapped["TreeNode | None"] = relationship("TreeNode", back_populates="children", remote_side=[id])
+    parent: Mapped["TreeNode | None"] = relationship("TreeNode", back_populates="children", remote_side="TreeNode.id")
 
 
 class Atom(Base):
