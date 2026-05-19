@@ -189,8 +189,7 @@ async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGen
     if not text.strip():
         return
     text_clean, _ = _clean(text)
-    value = f"{doc_value} | {text_clean}"
     yield ParsedNode(
-        node=_make_node(atom_level, value, state.raw_pos, len(text), state.clean_pos, len(text_clean), doc_index, terminal=True),
+        node=_make_node(atom_level, text_clean, state.raw_pos, len(text), state.clean_pos, len(text_clean), doc_index, terminal=True),
         is_atom=True,
     )

@@ -17,7 +17,7 @@ from stardust.config import (
 )
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
-from stardust.models import Atom
+from stardust.models import Atom, TreeNode
 from stardust.parse import (
     _parse_md_tables,
     clean_value,
@@ -114,7 +114,8 @@ async def phase_nlp_embed() -> None:
 
     async with SessionLocal() as read_session, read_session.begin():
         stream = await read_session.stream(
-            select(Atom.id, Atom.value, Atom.clean_offset, Atom.value_hash)
+            select(Atom.id, Atom.value, Atom.clean_offset, Atom.value_hash, TreeNode.value.label("ancestry"))
+            .join(TreeNode, TreeNode.id == Atom.parent_id)
             .execution_options(yield_per=NLP_COMMIT_BATCH_SIZE)
         )
         async for partition in stream.partitions(NLP_COMMIT_BATCH_SIZE):
@@ -122,15 +123,19 @@ async def phase_nlp_embed() -> None:
             texts = [r.value for r in partition]
             clean_starts = [r.clean_offset["start"] for r in partition]
             old_hashes = [r.value_hash for r in partition]
+            ancestries = [r.ancestry for r in partition]
 
             enriched_map: dict[int, str] = {}
             async for atom_id, enriched in extract_batch(atom_ids, texts, clean_starts, embedder):
                 enriched_map[atom_id] = enriched
 
             id_to_text = dict(zip(atom_ids, texts, strict=False))
+            id_to_ancestry = dict(zip(atom_ids, ancestries, strict=False))
             ids, embed_texts, hashes = [], [], []
             for atom_id, old_hash in zip(atom_ids, old_hashes, strict=False):
                 enriched = enriched_map.get(atom_id, clean_value(id_to_text[atom_id]))
+                ancestry = id_to_ancestry[atom_id]
+                enriched = f"{ancestry} | {enriched}" if ancestry else enriched
                 new_hash = hashlib.sha256(enriched.encode()).hexdigest()
                 if old_hash != new_hash:
                     ids.append(atom_id)
