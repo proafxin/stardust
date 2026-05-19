@@ -6,11 +6,9 @@ from sqlalchemy import cast, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
-from stardust.models import Atom, EntityMention, TreeNode
-from stardust.models import CanonicalEntity as CanonicalEntityModel
+from stardust.models import Atom, CanonicalEntity, Disambiguation, EntityMention, Token, TreeNode
 from stardust.registry import embedder as load_embedder
 from stardust.registry import reranker as load_reranker
-from stardust.resolution.global_resolution import CanonicalEntity
 from stardust.tree.atom import Node
 
 
@@ -20,9 +18,6 @@ class RankedAtom:
     record_id: str
     value: str
     score: float
-
-
-_INSERT_CHUNK = 3_000
 
 
 async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: AsyncSession) -> None:
@@ -41,8 +36,6 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                     value=node.value,
                     raw_offset=node.raw_offset.model_dump(),
                     clean_offset=node.clean_offset.model_dump(),
-                    nlp_attributes=[],
-                    disambiguation=None,
                 )
                 .returning(TreeNode.id)
             )
@@ -57,33 +50,47 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                         value=node.value,
                         raw_offset=node.raw_offset.model_dump(),
                         clean_offset=node.clean_offset.model_dump(),
-                        nlp_attributes=[],
-                        disambiguation=None,
                         embedding=None,
                     )
                 )
     await session.commit()
 
 
-async def insert_canonical_entities(entities: list[CanonicalEntity], record_id: str, session: AsyncSession) -> None:
-    for entity in entities:
-        ce = CanonicalEntityModel(
-            canonical_name=entity.canonical_name, entity_type=entity.entity_type, aliases=entity.aliases
+async def insert_tokens(atom_id: int, tokens: list[dict], session: AsyncSession) -> None:
+    if not tokens:
+        return
+    await session.execute(insert(Token), [{"atom_id": atom_id, **t} for t in tokens])
+
+
+async def insert_canonical_entities(
+    entities: list[tuple[str, str, list[str], list[tuple[int, str, int]]]],
+    session: AsyncSession,
+) -> None:
+    for canonical_name, entity_type, aliases, mentions in entities:
+        result = await session.execute(
+            insert(CanonicalEntity)
+            .values(canonical_name=canonical_name, entity_type=entity_type, aliases=aliases)
+            .returning(CanonicalEntity.id)
         )
-        session.add(ce)
-        await session.flush()
-        for text_val, offset, atom_id, _ in entity.mentions:
+        ce_id = result.scalar_one()
+        member_token_ids = [token_id for token_id, _, _ in mentions]
+        for token_id, record_id, atom_id in mentions:
             session.add(
                 EntityMention(
                     atom_id=atom_id,
                     record_id=record_id,
-                    canonical_id=ce.id,
-                    text=text_val,
-                    entity_type=entity.entity_type,
-                    raw_offset=offset.model_dump(),
-                    clean_offset=offset.model_dump(),
+                    canonical_id=ce_id,
+                    text=canonical_name,
+                    entity_type=entity_type,
+                    raw_offset={"start": 0, "end": 0},
+                    clean_offset={"start": 0, "end": 0},
                 )
             )
+        await session.execute(
+            Disambiguation.__table__.update()
+            .where(Disambiguation.canonical_token_id.in_(member_token_ids))
+            .values(canonical_entity_id=ce_id)
+        )
     await session.commit()
 
 

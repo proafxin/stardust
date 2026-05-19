@@ -13,26 +13,6 @@ class SpanOffset(BaseModel):
     end: int
 
 
-class TokenAttributes(BaseModel):
-    text: str
-    pos_: str
-    dep_: str
-    morph: dict[str, str]
-    ent_type_: str
-    ent_iob_: str
-    offset: SpanOffset
-
-
-class PronounResolution(BaseModel):
-    offset: SpanOffset
-    token: str
-    referent: str
-
-
-class DisambiguationMetadata(BaseModel):
-    pronoun_map: list[PronounResolution]
-
-
 class Node(BaseModel):
     parent_index: int | None
     node_type: str
@@ -41,5 +21,3 @@ class Node(BaseModel):
     raw_offset: SpanOffset
     clean_offset: SpanOffset
     terminal: bool
-    nlp_attributes: list[TokenAttributes]
-    disambiguation: DisambiguationMetadata | None

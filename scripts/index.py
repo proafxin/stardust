@@ -7,37 +7,43 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
-import pyarrow.parquet as pq
 import cupy
+import faiss
+import numpy as np
+import pyarrow.parquet as pq
 import torch
-from sqlalchemy import select, text, update, cast
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import insert, select, text, update
+from sqlalchemy.orm import aliased
 
 from stardust.config import (
     ATOM_TOKEN_LIMIT,
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_INTERNAL_BATCH_SIZE,
     NLP_COMMIT_BATCH_SIZE,
+    NUMERIC_ENTITY_TYPES,
+    UNRESOLVED_TOP_K,
 )
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
-from stardust.models import Atom, BatchPrompt
+from stardust.models import Atom, BatchPrompt, CanonicalEntity, Disambiguation, Token
 from stardust.parse import _token_count, clean_value, normalize_crag, normalize_hotpotqa, normalize_qasper
-from stardust.query import insert_canonical_entities, insert_index
+from stardust.query import insert_canonical_entities, insert_index, insert_tokens
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_llm_tokenizer, unload_nlp, unload_reranker
-from stardust.resolution.global_resolution import merge_across_records
-from stardust.resolution.local import (
-    _nominal_spans,
-    build_batch_prompts,
-    collect_entity_mentions,
-)
-from stardust.tree.atom import Node, TokenAttributes
+from stardust.resolution.global_resolution import canonicalize_by_type
+from stardust.resolution.local import build_batch_prompts
+from stardust.tree.atom import Node
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
+_UNRESOLVED_PREAMBLE = (
+    "Given an unresolved nominal token and a list of candidate named entities with context, "
+    "output the token_id of the named entity this nominal refers to, or null if none apply.\n"
+    "Output a single JSON object: {\"referent_id\": <token_id or null>}\n\n"
+)
 
 DATA_DIR = Path("data")
 N = 200  # 0 = no limit
@@ -47,9 +53,6 @@ DATASETS: list[tuple[str, Path, str]] = [
     # ("qasper", DATA_DIR / "qasper" / "train.parquet", "qasper"),  # TODO: fix chunking
     ("crag_open", DATA_DIR / "crag" / "open" / "train.parquet", "crag_open"),
 ]
-
-DISAMBIGUATION_CACHE = DATA_DIR / "disambiguation_cache.json"
-
 
 PARQUET_BATCH_SIZE = 10_000
 
@@ -127,53 +130,40 @@ async def phase_nlp() -> None:
             texts = [r.value for r in partition]
             clean_starts = [r.clean_offset["start"] for r in partition]
             async with SessionLocal() as write_session:
-                async for atom_id, attrs in extract_batch(atom_ids, texts, clean_starts):
-                    await write_session.execute(
-                        update(Atom).where(Atom.id == atom_id).values(nlp_attributes=[a.model_dump() for a in attrs])
-                    )
+                async for atom_id, tokens in extract_batch(atom_ids, texts, clean_starts):
+                    await insert_tokens(atom_id, tokens, write_session)
                 await write_session.commit()
             done += len(partition)
             log.info("phase 2: %d atoms done, VRAM free %.2fGB", done, torch.cuda.mem_get_info()[0] / 1024**3)
 
 
-# ── Phase 3: LLM pronoun resolution (Ollama / Qwen3 4B) ─────────────────────
+# ── Phase 3: LLM local disambiguation ───────────────────────────────────────
 
 
-async def _stream_pending_llm_rows() -> AsyncGenerator[tuple[int, str, list]]:
+async def _stream_atoms_with_tokens() -> AsyncGenerator[tuple[int, str, list[dict]]]:
     async with SessionLocal() as session, session.begin():
-        stream = await session.stream(
-            select(Atom.id, Atom.value, Atom.nlp_attributes).where(Atom.disambiguation == {})
-        )
-        async for row in stream:
-            yield row.id, row.value, row.nlp_attributes
+        atom_rows = (await session.execute(
+            select(Atom.id, Atom.value)
+            .join(Token, Token.atom_id == Atom.id)
+            .distinct()
+        )).fetchall()
+
+    for row in atom_rows:
+        async with SessionLocal() as session:
+            token_rows = (await session.execute(
+                select(Token.id, Token.token_index, Token.text)
+                .where(Token.atom_id == row.id)
+                .order_by(Token.token_index)
+            )).fetchall()
+        yield row.id, row.value, [{"id": t.id, "token_index": t.token_index, "text": t.text} for t in token_rows]
 
 
 async def phase_llm() -> None:
-    log.info("phase 3: llm pronoun resolution")
+    log.info("phase 3: llm local disambiguation")
     log.info("phase 3: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-    if DISAMBIGUATION_CACHE.exists():
-        cache = json.loads(DISAMBIGUATION_CACHE.read_text())
-        async with SessionLocal() as session:
-            for entry in cache:
-                await session.execute(
-                    update(Atom)
-                    .where(Atom.id == entry["id"], Atom.disambiguation == {})
-                    .values(disambiguation=entry["disambiguation"])
-                )
-            await session.commit()
-        log.info("phase 3: loaded %d disambiguation entries from cache", len(cache))
-
-    async def _pending_rows():
-        async with SessionLocal() as session, session.begin():
-            stream = await session.stream(
-                select(Atom.id, Atom.value, Atom.nlp_attributes).where(Atom.disambiguation == {})
-            )
-            async for row in stream:
-                yield row.id, row.value, row.nlp_attributes
-
     i = 0
-    async for prompt, batch in build_batch_prompts(_stream_pending_llm_rows()):
+    async for prompt, batch in build_batch_prompts(_stream_atoms_with_tokens()):
         while True:
             try:
                 async with SessionLocal() as session:
@@ -183,41 +173,30 @@ async def phase_llm() -> None:
                 try:
                     start, end = raw.find("{"), raw.rfind("}") + 1
                     result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
-                    pronoun_map = {
-                        str(k): v for k, v in result.items() if str(k).lstrip("-").isdigit() and isinstance(v, int)
+                    token_map = {
+                        int(k): int(v) for k, v in result.items()
+                        if str(k).lstrip("-").isdigit() and isinstance(v, int)
                     }
                 except json.JSONDecodeError:
                     log.warning("phase 3: failed to parse LLM response: %s", raw[:200])
-                    pronoun_map = {}
-                global_tokens: dict[int, tuple[int, TokenAttributes]] = {}
-                token_counter = 0
-                for atom_id, _value, nlp_attrs in batch:
-                    attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
-                    for nominal in _nominal_spans(attrs):
-                        global_tokens[token_counter] = (atom_id, nominal)
-                        token_counter += 1
+                    token_map = {}
+                all_token_ids = {t["id"] for _, tokens in batch for t in tokens}
                 async with SessionLocal() as session:
-                    atom_disambig: dict[int, list] = {atom_id: [] for atom_id, _, _ in batch}
-                    for tid_str, rid in pronoun_map.items():
-                        tid = int(tid_str)
-                        if tid not in global_tokens or rid not in global_tokens:
-                            continue
-                        atom_id, matched = global_tokens[tid]
-                        _, referent_token = global_tokens[rid]
-                        atom_disambig[atom_id].append(
-                            {
-                                "offset": matched.offset.model_dump(),
-                                "token": matched.text,
-                                "referent": referent_token.text,
+                    rows = []
+                    for atom_id, tokens in batch:
+                        for t in tokens:
+                            referent_id = token_map.get(t["id"])
+                            if referent_id is None or referent_id not in all_token_ids:
+                                continue
+                            rows.append({
+                                "token_id": t["id"],
+                                "referent_id": referent_id,
+                                "canonical_token_id": referent_id,
+                                "atom_id": atom_id,
                                 "confidence": 1.0,
-                            }
-                        )
-                    for atom_id, _value, _ in batch:
-                        await session.execute(
-                            update(Atom)
-                            .where(Atom.id == atom_id)
-                            .values(disambiguation={"pronoun_map": atom_disambig[atom_id]})
-                        )
+                            })
+                    if rows:
+                        await session.execute(insert(Disambiguation), rows)
                     await session.commit()
                 log.info("phase 3: batch %d done, VRAM free %.2fGB", i + 1, torch.cuda.mem_get_info()[0] / 1024**3)
                 break
@@ -229,56 +208,169 @@ async def phase_llm() -> None:
     log.info("phase 3: done")
 
 
-# ── Phase 4: Disambiguation + embedding ─────────────────────────────────────
+# ── Phase 3.5: Transitive closure ────────────────────────────────────────────
 
 
-async def _collect_entity_mentions() -> list[tuple[str, list]]:
-    per_record: dict[str, list] = {}
+async def phase_transitive_closure() -> None:
+    log.info("phase 3.5: transitive closure")
+    rounds = 0
+    while True:
+        async with SessionLocal() as session:
+            # find disambiguation rows whose canonical_token_id points to another token
+            # that itself has a disambiguation row pointing to a named entity
+            next_hop = aliased(Disambiguation)
+            referent_token = aliased(Token)
+            result = await session.execute(
+                select(Disambiguation.id, next_hop.canonical_token_id.label("final_id"))
+                .join(next_hop, next_hop.token_id == Disambiguation.canonical_token_id)
+                .join(referent_token, referent_token.id == next_hop.canonical_token_id)
+                .where(referent_token.ent_type.is_not(None))
+            )
+            rows = result.fetchall()
+            if not rows:
+                break
+            for row in rows:
+                await session.execute(
+                    update(Disambiguation)
+                    .where(Disambiguation.id == row.id)
+                    .values(canonical_token_id=row.final_id)
+                )
+            await session.commit()
+            rounds += 1
+    log.info("phase 3.5: done (%d rounds)", rounds)
+
+
+# ── Phase 3.6: Embedding-based resolution for unresolved nominals ────────────
+
+
+async def phase_unresolved() -> None:
+    log.info("phase 3.6: unresolved nominal resolution")
+    log.info("phase 3.6: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+
     async with SessionLocal() as session, session.begin():
-        stream = await session.stream(select(Atom.id, Atom.record_id, Atom.nlp_attributes, Atom.disambiguation))
-        async for row in stream:
-            if row.record_id not in per_record:
-                per_record[row.record_id] = []
-            per_record[row.record_id].append((row.id, row.nlp_attributes, row.disambiguation))
-    return [(record_id, collect_entity_mentions(record_id, rows)) for record_id, rows in per_record.items()]
+        unresolved_rows = (await session.execute(
+            select(Token.id, Token.atom_id, Token.text, Token.context)
+            .outerjoin(Disambiguation, Disambiguation.token_id == Token.id)
+            .where(Disambiguation.id.is_(None))
+        )).fetchall()
+
+        if not unresolved_rows:
+            log.info("phase 3.6: no unresolved nominals")
+            return
+
+        named_entity_rows = (await session.execute(
+            select(Token.id, Token.atom_id, Token.text, Token.context, Token.ent_type)
+            .where(Token.ent_type.is_not(None))
+            .where(Token.ent_type.not_in(NUMERIC_ENTITY_TYPES))
+        )).fetchall()
+
+    if not named_entity_rows:
+        log.info("phase 3.6: no named entities to resolve against")
+        return
+
+    embedder = load_embedder()
+    ne_contexts = [r.context for r in named_entity_rows]
+    ne_vecs = embedder.encode(ne_contexts, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE, normalize_embeddings=True, show_progress_bar=False)
+
+    index = faiss.IndexFlatIP(ne_vecs.shape[1])
+    index.add(ne_vecs.astype(np.float32))
+
+    unresolved_contexts = [r.context for r in unresolved_rows]
+    unresolved_vecs = embedder.encode(unresolved_contexts, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE, normalize_embeddings=True, show_progress_bar=False)
+
+    k = min(UNRESOLVED_TOP_K, len(named_entity_rows))
+    distances, indices = index.search(unresolved_vecs.astype(np.float32), k)
+
+    i = 0
+    async with SessionLocal() as session:
+        for unresolved, dists, idxs in zip(unresolved_rows, distances, indices, strict=False):
+            candidates = [
+                named_entity_rows[j] for j, d in zip(idxs, dists, strict=False) if d > 0.5
+            ]
+            if not candidates:
+                continue
+            candidates_str = ", ".join(f"{c.id}:{c.text} ({c.context})" for c in candidates)
+            prompt = _UNRESOLVED_PREAMBLE + f"Token {unresolved.id}:{unresolved.text} ({unresolved.context})\nCandidates: {candidates_str}"
+            raw = await ollama_complete(prompt, max_tokens=50)
+            try:
+                start, end = raw.find("{"), raw.rfind("}") + 1
+                result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
+                referent_id = result.get("referent_id")
+                if referent_id is not None and isinstance(referent_id, int):
+                    await session.execute(
+                        insert(Disambiguation).values(
+                            token_id=unresolved.id,
+                            referent_id=referent_id,
+                            canonical_token_id=referent_id,
+                            atom_id=unresolved.atom_id,
+                            confidence=float(dists[0]),
+                        )
+                    )
+                    i += 1
+            except (json.JSONDecodeError, ValueError):
+                pass
+        await session.commit()
+    log.info("phase 3.6: resolved %d unresolved nominals", i)
 
 
-async def _stream_atom_texts(atom_ids: set[int]) -> dict[int, str]:
-    atom_texts: dict[int, str] = {}
+# ── Phase 4: Global canonicalization ─────────────────────────────────────────
+
+
+async def phase_canonicalization() -> None:
+    log.info("phase 4: global canonicalization")
+
     async with SessionLocal() as session, session.begin():
-        stream = await session.stream(select(Atom.id, Atom.value).where(Atom.id.in_(atom_ids)))
-        async for row in stream:
-            atom_texts[row.id] = clean_value(row.value)
-    return atom_texts
+        rows = (await session.execute(
+            select(Token.id, Token.atom_id, Token.text, Token.context, Token.ent_type)
+            .where(Token.ent_type.is_not(None))
+            .where(Token.ent_type.not_in(NUMERIC_ENTITY_TYPES))
+        )).fetchall()
+
+    by_type: dict[str, list[dict]] = {}
+    for r in rows:
+        by_type.setdefault(r.ent_type, []).append({"id": r.id, "atom_id": r.atom_id, "text": r.text, "context": r.context})
+
+    token_to_atom: dict[int, int] = {r.id: r.atom_id for r in rows}
+
+    async with SessionLocal() as session:
+        for ent_type, tokens in by_type.items():
+            result = await canonicalize_by_type(ent_type, tokens)
+            if not result:
+                continue
+            entities = []
+            for canonical_token_id, member_token_ids in result.items():
+                canonical_token = next((t for t in tokens if t["id"] == canonical_token_id), None)
+                if not canonical_token:
+                    continue
+                aliases = list({t["text"] for t in tokens if t["id"] in member_token_ids})
+                mentions = [(tid, "global", token_to_atom[tid]) for tid in member_token_ids if tid in token_to_atom]
+                entities.append((canonical_token["text"], ent_type, aliases, mentions))
+                await session.execute(
+                    update(Disambiguation)
+                    .where(Disambiguation.canonical_token_id.in_(member_token_ids))
+                    .values(canonical_token_id=canonical_token_id)
+                )
+            await insert_canonical_entities(entities, session)
+            await session.commit()
+        log.info("phase 4: done")
 
 
-async def phase_disambiguation() -> None:
-    log.info("phase 4: disambiguation + embedding")
+# ── Phase 5: Embedding ────────────────────────────────────────────────────────
 
-    per_record = await _collect_entity_mentions()
-    needed_atom_ids = {atom_id for _, mentions in per_record for _, _, _, atom_id, _ in mentions}
-    atom_texts = await _stream_atom_texts(needed_atom_ids)
 
-    log.info("before merge_across_records: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+async def phase_embedding() -> None:
+    log.info("phase 5: embedding")
 
-    global_entities = await merge_across_records(per_record, atom_texts)
-    del atom_texts
-    log.info("phase 4: %d canonical entities", len(global_entities))
+    async with SessionLocal() as session, session.begin():
+        alias_rows = (await session.execute(
+            select(Disambiguation.atom_id, CanonicalEntity.aliases)
+            .join(CanonicalEntity, CanonicalEntity.id == Disambiguation.canonical_entity_id)
+            .where(Disambiguation.canonical_entity_id.is_not(None))
+        )).fetchall()
 
     atom_aliases: dict[int, list[str]] = {}
-    for entity in global_entities:
-        for _, _, atom_id, _ in entity.mentions:
-            atom_aliases.setdefault(atom_id, []).extend(entity.aliases)
-
-    async with SessionLocal() as session, session.begin():
-        coref_stream = await session.stream(
-            select(Atom.id, Atom.disambiguation).where(Atom.disambiguation != cast("{}", JSONB))
-        )
-        coref_map: dict[int, list[str]] = {}
-        async for row in coref_stream:
-            referents = [e["referent"] for e in row.disambiguation.get("pronoun_map", []) if e.get("referent")]
-            if referents:
-                coref_map[row.id] = referents
+    for row in alias_rows:
+        atom_aliases.setdefault(row.atom_id, []).extend(row.aliases)
 
     embedder = load_embedder()
     done = stale = 0
@@ -292,8 +384,6 @@ async def phase_disambiguation() -> None:
                 parts = [clean_value(row.value)]
                 if row.id in atom_aliases:
                     parts.append(" ".join(atom_aliases[row.id]))
-                if row.id in coref_map:
-                    parts.append(" ".join(coref_map[row.id]))
                 enriched = " ".join(parts)
                 new_hash = hashlib.sha256(enriched.encode()).hexdigest()
                 texts.append(enriched)
@@ -318,12 +408,9 @@ async def phase_disambiguation() -> None:
                     await write_session.commit()
             stale += len(stale_idx)
             done += len(partition)
-            log.info("phase 4: embedded %d/%d atoms", done, done)
+            log.info("phase 5: embedded %d atoms", done)
 
-    log.info("phase 4: embedded %d stale atoms", stale)
-
-    async with SessionLocal() as session:
-        await insert_canonical_entities(global_entities, "global", session)
+    log.info("phase 5: embedded %d stale atoms", stale)
 
     async with SessionLocal() as session:
         await session.execute(
@@ -334,9 +421,8 @@ async def phase_disambiguation() -> None:
             )
         )
         await session.commit()
-    log.info("phase 4: hnsw index created")
-
-    log.info("phase 4: done")
+    log.info("phase 5: hnsw index created")
+    log.info("phase 5: done")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -374,6 +460,28 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
         cupy.get_default_pinned_memory_pool().free_all_blocks()
         torch.cuda.empty_cache()
         await phase_llm()
+        await phase_transitive_closure()
+        unload_embedder()
+        unload_reranker()
+        unload_nlp()
+        unload_llm_tokenizer()
+        await ollama_unload()
+        gc.collect()
+        cupy.get_default_memory_pool().free_all_blocks()
+        cupy.get_default_pinned_memory_pool().free_all_blocks()
+        torch.cuda.empty_cache()
+        load_embedder()
+        await phase_unresolved()
+        unload_embedder()
+        unload_reranker()
+        unload_nlp()
+        unload_llm_tokenizer()
+        await ollama_unload()
+        gc.collect()
+        cupy.get_default_memory_pool().free_all_blocks()
+        cupy.get_default_pinned_memory_pool().free_all_blocks()
+        torch.cuda.empty_cache()
+        await phase_canonicalization()
     unload_embedder()
     unload_reranker()
     unload_nlp()
@@ -384,7 +492,7 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     cupy.get_default_pinned_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
     load_embedder()
-    await phase_disambiguation()
+    await phase_embedding()
     unload_embedder()
     unload_reranker()
     unload_nlp()

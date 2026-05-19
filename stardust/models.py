@@ -27,8 +27,6 @@ class TreeNode(Base):
     value: Mapped[str] = mapped_column(Text)
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
-    nlp_attributes: Mapped[list] = mapped_column(JSONB, default=[])
-    disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     children: Mapped[list["TreeNode"]] = relationship("TreeNode", back_populates="parent")
     parent: Mapped["TreeNode | None"] = relationship("TreeNode", back_populates="children", remote_side="TreeNode.id")
@@ -42,8 +40,6 @@ class Atom(Base):
     value: Mapped[str] = mapped_column(Text)
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
-    nlp_attributes: Mapped[list] = mapped_column(JSONB, default=[])
-    disambiguation: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default='{"pronoun_map": []}')
     value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
 
@@ -57,6 +53,33 @@ class Atom(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
+
+
+class Token(Base):
+    __tablename__ = "tokens"
+
+    atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"), nullable=False, index=True)
+    token_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    start: Mapped[int] = mapped_column(Integer, nullable=False)
+    end: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    pos: Mapped[str] = mapped_column(String(16), nullable=False)
+    dep: Mapped[str] = mapped_column(String(32), nullable=False)
+    morph: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    ent_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ent_iob: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    context: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class Disambiguation(Base):
+    __tablename__ = "disambiguation"
+
+    token_id: Mapped[int] = mapped_column(Integer, ForeignKey("tokens.id"), nullable=False, index=True)
+    referent_id: Mapped[int] = mapped_column(Integer, ForeignKey("tokens.id"), nullable=False)
+    canonical_token_id: Mapped[int] = mapped_column(Integer, ForeignKey("tokens.id"), nullable=False)
+    atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"), nullable=False, index=True)
+    canonical_entity_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("canonical_entities.id"), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
 
 
 class BatchPrompt(Base):
@@ -73,8 +96,6 @@ class CanonicalEntity(Base):
     entity_type: Mapped[str] = mapped_column(String(64))
     aliases: Mapped[list] = mapped_column(JSONB, default=[])
 
-    mentions: Mapped[list["EntityMention"]] = relationship("EntityMention", back_populates="canonical_entity")
-
 
 class EntityMention(Base):
     __tablename__ = "entity_mentions"
@@ -87,5 +108,3 @@ class EntityMention(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
-
-    canonical_entity: Mapped["CanonicalEntity | None"] = relationship("CanonicalEntity", back_populates="mentions")
