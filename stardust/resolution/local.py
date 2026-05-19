@@ -1,5 +1,4 @@
 from stardust.config import NUMERIC_ENTITY_TYPES
-from stardust.parse import clean_value
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
 
@@ -106,7 +105,8 @@ def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes])
     nominals = _nominal_spans(attrs)
     if not nominals:
         return None
-    return {"atom_id": atom_id, "text": clean_value(value), "nominals": nominals}
+    leaf = value.rsplit(" | ", 1)[-1] if " | " in value else value
+    return {"atom_id": atom_id, "text": leaf, "nominals": nominals}
 
 
 def build_batch_prompt(atom_data: list[dict]) -> str:

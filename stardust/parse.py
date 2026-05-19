@@ -18,7 +18,7 @@ from stardust.tree.atom import Modality, Node, SpanOffset
 
 
 def clean_value(value: str) -> str:
-    raw = value.split(" | ", 1)[-1] if " | " in value else value
+    raw = value.rsplit(" | ", 1)[-1] if " | " in value else value
     raw = re.sub(r"\b[0-9a-f]{32}\b", "", raw)
     raw = re.sub(r"https?%3A%2F%2F\S+", "", raw)
     raw = re.sub(r"https?://\S+", "", raw)
