@@ -20,7 +20,7 @@ from stardust.config import (
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
-from stardust.models import AtomModel, BatchPromptModel
+from stardust.models import Atom, BatchPrompt
 from stardust.parse import _token_count, clean_value, normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
@@ -118,7 +118,7 @@ async def phase_nlp() -> None:
 
     done = 0
     async with SessionLocal() as read_session, read_session.begin():
-        stream = await read_session.stream(select(AtomModel.id, AtomModel.value, AtomModel.clean_offset))
+        stream = await read_session.stream(select(Atom.id, Atom.value, Atom.clean_offset))
         async for partition in stream.partitions(NLP_COMMIT_BATCH_SIZE):
             atom_ids = [r.id for r in partition]
             texts = [r.value for r in partition]
@@ -126,8 +126,8 @@ async def phase_nlp() -> None:
             async with SessionLocal() as write_session:
                 async for atom_id, attrs in extract_batch(atom_ids, texts, clean_starts):
                     await write_session.execute(
-                        update(AtomModel)
-                        .where(AtomModel.id == atom_id)
+                        update(Atom)
+                        .where(Atom.id == atom_id)
                         .values(nlp_attributes=[a.model_dump() for a in attrs])
                     )
                 await write_session.commit()
@@ -141,7 +141,7 @@ async def phase_nlp() -> None:
 async def _stream_pending_llm_rows() -> AsyncGenerator[tuple[int, str, list]]:
     async with SessionLocal() as session, session.begin():
         stream = await session.stream(
-            select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes).where(AtomModel.disambiguation.is_(None))
+            select(Atom.id, Atom.value, Atom.nlp_attributes).where(Atom.disambiguation.is_(None))
         )
         async for row in stream:
             yield row.id, row.value, row.nlp_attributes
@@ -156,8 +156,8 @@ async def phase_llm() -> None:
         async with SessionLocal() as session:
             for entry in cache:
                 await session.execute(
-                    update(AtomModel)
-                    .where(AtomModel.id == entry["id"], AtomModel.disambiguation.is_(None))
+                    update(Atom)
+                    .where(Atom.id == entry["id"], Atom.disambiguation.is_(None))
                     .values(disambiguation=entry["disambiguation"])
                 )
             await session.commit()
@@ -166,8 +166,8 @@ async def phase_llm() -> None:
     async def _pending_rows():
         async with SessionLocal() as session, session.begin():
             stream = await session.stream(
-                select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes).where(
-                    AtomModel.disambiguation.is_(None)
+                select(Atom.id, Atom.value, Atom.nlp_attributes).where(
+                    Atom.disambiguation.is_(None)
                 )
             )
             async for row in stream:
@@ -178,7 +178,7 @@ async def phase_llm() -> None:
         while True:
             try:
                 async with SessionLocal() as session:
-                    session.add(BatchPromptModel(batch_no=i, prompt=prompt))
+                    session.add(BatchPrompt(batch_no=i, prompt=prompt))
                     await session.commit()
                 raw = await ollama_complete(prompt, max_tokens=max(500, len(batch) * 50))
                 try:
@@ -215,8 +215,8 @@ async def phase_llm() -> None:
                         )
                     for atom_id, _value, _ in batch:
                         await session.execute(
-                            update(AtomModel)
-                            .where(AtomModel.id == atom_id)
+                            update(Atom)
+                            .where(Atom.id == atom_id)
                             .values(disambiguation={"pronoun_map": atom_disambig[atom_id]})
                         )
                     await session.commit()
@@ -237,7 +237,7 @@ async def _collect_entity_mentions() -> list[tuple[str, list]]:
     per_record: dict[str, list] = {}
     async with SessionLocal() as session, session.begin():
         stream = await session.stream(
-            select(AtomModel.id, AtomModel.record_id, AtomModel.nlp_attributes, AtomModel.disambiguation)
+            select(Atom.id, Atom.record_id, Atom.nlp_attributes, Atom.disambiguation)
         )
         async for row in stream:
             if row.record_id not in per_record:
@@ -249,7 +249,7 @@ async def _collect_entity_mentions() -> list[tuple[str, list]]:
 async def _stream_atom_texts(atom_ids: set[int]) -> dict[int, str]:
     atom_texts: dict[int, str] = {}
     async with SessionLocal() as session, session.begin():
-        stream = await session.stream(select(AtomModel.id, AtomModel.value).where(AtomModel.id.in_(atom_ids)))
+        stream = await session.stream(select(Atom.id, Atom.value).where(Atom.id.in_(atom_ids)))
         async for row in stream:
             atom_texts[row.id] = clean_value(row.value)
     return atom_texts
@@ -275,7 +275,7 @@ async def phase_disambiguation() -> None:
 
     async with SessionLocal() as session, session.begin():
         coref_stream = await session.stream(
-            select(AtomModel.id, AtomModel.disambiguation).where(AtomModel.disambiguation.is_not(None))
+            select(Atom.id, Atom.disambiguation).where(Atom.disambiguation.is_not(None))
         )
         coref_map: dict[int, list[str]] = {}
         async for row in coref_stream:
@@ -287,7 +287,7 @@ async def phase_disambiguation() -> None:
     done = stale = 0
     async with SessionLocal() as read_session, read_session.begin():
         stream = await read_session.stream(
-            select(AtomModel.id, AtomModel.value, AtomModel.value_hash).execution_options(
+            select(Atom.id, Atom.value, Atom.value_hash).execution_options(
                 yield_per=EMBEDDING_BATCH_SIZE
             )
         )
@@ -316,8 +316,8 @@ async def phase_disambiguation() -> None:
                 async with SessionLocal() as write_session:
                     for i, vec in zip(stale_idx, vecs, strict=False):
                         await write_session.execute(
-                            update(AtomModel)
-                            .where(AtomModel.id == ids[i])
+                            update(Atom)
+                            .where(Atom.id == ids[i])
                             .values(embedding=vec.tolist(), value=texts[i], value_hash=hashes[i][1])
                         )
                     await write_session.commit()

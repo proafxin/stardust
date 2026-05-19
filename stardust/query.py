@@ -6,7 +6,7 @@ from sqlalchemy import cast, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
-from stardust.models import AtomModel, CanonicalEntityModel, EntityMentionModel, TreeNodeModel
+from stardust.models import Atom, CanonicalEntity as CanonicalEntityModel, EntityMention, TreeNode
 from stardust.registry import embedder as load_embedder
 from stardust.registry import reranker as load_reranker
 from stardust.resolution.global_resolution import CanonicalEntity
@@ -34,7 +34,7 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                 transient_to_db.get(node.transient_parent_id) if node.transient_parent_id is not None else None
             )
             result = await session.execute(
-                insert(TreeNodeModel)
+                insert(TreeNode)
                 .values(
                     record_id=record_id,
                     parent_id=db_parent_id,
@@ -46,13 +46,13 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                     nlp_attributes=[],
                     disambiguation=None,
                 )
-                .returning(TreeNodeModel.id)
+                .returning(TreeNode.id)
             )
             db_id = result.scalar_one()
             transient_to_db[node.transient_id] = db_id
             if node.transient_id in atom_set:
                 await session.execute(
-                    insert(AtomModel).values(
+                    insert(Atom).values(
                         id=db_id,
                         record_id=record_id,
                         parent_id=db_parent_id,
@@ -76,7 +76,7 @@ async def insert_canonical_entities(entities: list[CanonicalEntity], record_id: 
         await session.flush()
         for text_val, offset, atom_id, _ in entity.mentions:
             session.add(
-                EntityMentionModel(
+                EntityMention(
                     atom_id=atom_id,
                     record_id=record_id,
                     canonical_id=ce.id,
@@ -91,14 +91,14 @@ async def insert_canonical_entities(entities: list[CanonicalEntity], record_id: 
 
 async def dense_search(query: str, session: AsyncSession, record_id: str | None = None) -> list[RankedAtom]:
     vec = cast(load_embedder().encode(query, normalize_embeddings=True).tolist(), Vector)
-    distance = AtomModel.embedding.cosine_distance(vec).label("distance")
+    distance = Atom.embedding.cosine_distance(vec).label("distance")
     stmt = (
-        select(AtomModel.id, AtomModel.record_id, AtomModel.value, (1 - distance).label("score"))
-        .where(AtomModel.embedding.is_not(None))
+        select(Atom.id, Atom.record_id, Atom.value, (1 - distance).label("score"))
+        .where(Atom.embedding.is_not(None))
         .order_by(distance)
     )
     if record_id:
-        stmt = stmt.where(AtomModel.record_id == record_id)
+        stmt = stmt.where(Atom.record_id == record_id)
     rows = (await session.execute(stmt)).fetchall()
     return [RankedAtom(id=r.id, record_id=r.record_id, value=r.value, score=r.score) for r in rows]
 

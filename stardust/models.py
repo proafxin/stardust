@@ -12,12 +12,10 @@ from stardust.config import EMBEDDING_DIM
 class Base(DeclarativeBase):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-class TreeNodeModel(Base):
+class TreeNode(Base):
     __tablename__ = "tree_nodes"
 
     record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
@@ -30,11 +28,11 @@ class TreeNodeModel(Base):
     nlp_attributes: Mapped[list] = mapped_column(JSONB, default=[])
     disambiguation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    children: Mapped[list["TreeNodeModel"]] = relationship("TreeNodeModel", back_populates="parent")
-    parent: Mapped["TreeNodeModel | None"] = relationship("TreeNodeModel", back_populates="children", remote_side=[id])
+    children: Mapped[list["TreeNode"]] = relationship("TreeNode", back_populates="parent")
+    parent: Mapped["TreeNode | None"] = relationship("TreeNode", back_populates="children", remote_side=[id])
 
 
-class AtomModel(Base):
+class Atom(Base):
     __tablename__ = "atoms"
 
     record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
@@ -59,24 +57,24 @@ class AtomModel(Base):
     )
 
 
-class BatchPromptModel(Base):
+class BatchPrompt(Base):
     __tablename__ = "batch_prompts"
 
     batch_no: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     prompt: Mapped[str] = mapped_column(Text)
 
 
-class CanonicalEntityModel(Base):
+class CanonicalEntity(Base):
     __tablename__ = "canonical_entities"
 
     canonical_name: Mapped[str] = mapped_column(Text)
     entity_type: Mapped[str] = mapped_column(String(64))
     aliases: Mapped[list] = mapped_column(JSONB, default=[])
 
-    mentions: Mapped[list["EntityMentionModel"]] = relationship("EntityMentionModel", back_populates="canonical_entity")
+    mentions: Mapped[list["EntityMention"]] = relationship("EntityMention", back_populates="canonical_entity")
 
 
-class EntityMentionModel(Base):
+class EntityMention(Base):
     __tablename__ = "entity_mentions"
 
     atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"))
@@ -88,6 +86,6 @@ class EntityMentionModel(Base):
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
 
-    canonical_entity: Mapped["CanonicalEntityModel | None"] = relationship(
-        "CanonicalEntityModel", back_populates="mentions"
+    canonical_entity: Mapped["CanonicalEntity | None"] = relationship(
+        "CanonicalEntity", back_populates="mentions"
     )

@@ -5,7 +5,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from stardust.db import SessionLocal
-from stardust.models import AtomModel
+from stardust.models import Atom
 
 OUT = Path("data/disambiguation_cache.json")
 
@@ -13,8 +13,8 @@ OUT = Path("data/disambiguation_cache.json")
 async def main() -> None:
     async with SessionLocal() as session:
         result = await session.execute(
-            select(AtomModel.id, AtomModel.record_id, AtomModel.disambiguation).where(
-                AtomModel.disambiguation.is_not(None)
+            select(Atom.id, Atom.record_id, Atom.disambiguation).where(
+                Atom.disambiguation.is_not(None)
             )
         )
         rows = result.fetchall()
