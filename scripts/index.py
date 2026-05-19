@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path("data")
-N = 200  # 0 = no limit
+N = 1000  # 0 = no limit
 
 DATASETS: list[tuple[str, Path, str]] = [
     ("hotpotqa", DATA_DIR / "hotpotqa" / "corpus.parquet", "hotpotqa"),
