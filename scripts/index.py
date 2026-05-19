@@ -4,8 +4,9 @@ import gc
 import hashlib
 import json
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import pyarrow.parquet as pq
 import torch
@@ -33,7 +34,7 @@ from stardust.resolution.local import (
     build_batch_prompts,
     collect_entity_mentions,
 )
-from stardust.tree.atom import AtomIndex, DisambiguationMetadata, Node, SpanOffset, TokenAttributes
+from stardust.tree.atom import Node, TokenAttributes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -289,11 +290,10 @@ async def phase_nlp() -> None:
 # ── Phase 3: LLM pronoun resolution (Ollama / Qwen3 4B) ─────────────────────
 
 
-async def _stream_pending_llm_rows() -> AsyncGenerator[tuple[int, str, list], None]:
+async def _stream_pending_llm_rows() -> AsyncGenerator[tuple[int, str, list]]:
     async with SessionLocal() as session, session.begin():
         stream = await session.stream(
-            select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes)
-            .where(AtomModel.disambiguation.is_(None))
+            select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes).where(AtomModel.disambiguation.is_(None))
         )
         async for row in stream:
             yield row.id, row.value, row.nlp_attributes
@@ -318,8 +318,9 @@ async def phase_llm() -> None:
     async def _pending_rows():
         async with SessionLocal() as session, session.begin():
             stream = await session.stream(
-                select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes)
-                .where(AtomModel.disambiguation.is_(None))
+                select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes).where(
+                    AtomModel.disambiguation.is_(None)
+                )
             )
             async for row in stream:
                 yield row.id, row.value, row.nlp_attributes
@@ -335,7 +336,9 @@ async def phase_llm() -> None:
                 try:
                     start, end = raw.find("{"), raw.rfind("}") + 1
                     result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
-                    pronoun_map = {str(k): v for k, v in result.items() if str(k).lstrip("-").isdigit() and isinstance(v, int)}
+                    pronoun_map = {
+                        str(k): v for k, v in result.items() if str(k).lstrip("-").isdigit() and isinstance(v, int)
+                    }
                 except json.JSONDecodeError:
                     log.warning("phase 3: failed to parse LLM response: %s", raw[:200])
                     pronoun_map = {}
@@ -384,31 +387,13 @@ async def phase_llm() -> None:
 
 async def _process_record_disambiguation(record_id: str) -> tuple[str, list]:
     async with SessionLocal() as session:
-        result = await session.execute(select(AtomModel).where(AtomModel.record_id == record_id))
-        atom_rows = result.scalars().all()
-
-    nodes = {}
-    atoms = []
-    for row in atom_rows:
-        attrs = [TokenAttributes(**a) for a in (row.nlp_attributes or [])]
-        disambig = DisambiguationMetadata(**row.disambiguation) if row.disambiguation else None
-        nodes[row.id] = Node(
-            id=row.id,
-            node_type="paragraph",
-            modality="text",
-            value=row.value,
-            raw_offset=SpanOffset(**row.raw_offset),
-            clean_offset=SpanOffset(**row.clean_offset),
-            parent_id=row.parent_id,
-            terminal=True,
-            nlp_attributes=attrs,
-            disambiguation=disambig,
+        result = await session.execute(
+            select(AtomModel.id, AtomModel.nlp_attributes, AtomModel.disambiguation).where(
+                AtomModel.record_id == record_id
+            )
         )
-        atoms.append(row.id)
-
-    index = AtomIndex(nodes=nodes, children={}, atoms=atoms, embeddings={})
-    mentions = collect_entity_mentions(record_id, index)
-    return record_id, mentions
+        rows = [(r.id, r.nlp_attributes, r.disambiguation) for r in result.fetchall()]
+    return record_id, collect_entity_mentions(record_id, rows)
 
 
 async def phase_disambiguation() -> None:

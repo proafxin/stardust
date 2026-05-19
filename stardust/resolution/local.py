@@ -2,7 +2,7 @@ from collections.abc import AsyncGenerator
 
 from stardust.config import LLM_BATCH_TOKEN_LIMIT, NUMERIC_ENTITY_TYPES
 from stardust.registry import llm_tokenizer
-from stardust.tree.atom import DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
+from stardust.tree.atom import SpanOffset, TokenAttributes
 
 
 def _entity_spans(attrs: list[TokenAttributes]) -> list[tuple[str, str, SpanOffset]]:
@@ -55,53 +55,28 @@ def _context_window(attrs: list[TokenAttributes], entity_start: int, entity_end:
     return " ".join(a.text for a in attrs[lo:hi])
 
 
-def collect_entity_mentions(record_id: str, index: AtomIndex) -> list[tuple[str, str, SpanOffset, int, str]]:
+def collect_entity_mentions(
+    record_id: str, rows: list[tuple[int, list, dict | None]]
+) -> list[tuple[str, str, SpanOffset, int, str]]:
     mentions = []
-    for atom_id in index.atoms:
-        node = index.nodes[atom_id]
-        for surface, ent_type, offset in _entity_spans(node.nlp_attributes):
+    for atom_id, nlp_attrs, disambiguation in rows:
+        attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
+        for surface, ent_type, offset in _entity_spans(attrs):
             if not ent_type or ent_type in NUMERIC_ENTITY_TYPES:
                 continue
-            window = _context_window(node.nlp_attributes, offset.start, offset.end)
+            window = _context_window(attrs, offset.start, offset.end)
             context = " ".join(filter(None, [surface, window]))
             mentions.append((surface, ent_type, offset, atom_id, context))
-        if node.disambiguation:
-            for resolution in node.disambiguation.pronoun_map:
-                if not resolution.referent:
+        if disambiguation:
+            for resolution in disambiguation.get("pronoun_map") or []:
+                referent = resolution.get("referent", "")
+                if not referent:
                     continue
-                window = _context_window(node.nlp_attributes, resolution.offset.start, resolution.offset.end)
-                context = " ".join(filter(None, [resolution.referent, window]))
-                mentions.append((resolution.referent, "COREF", resolution.offset, atom_id, context))
+                offset = SpanOffset(**resolution["offset"])
+                window = _context_window(attrs, offset.start, offset.end)
+                context = " ".join(filter(None, [referent, window]))
+                mentions.append((referent, "COREF", offset, atom_id, context))
     return mentions
-
-
-def attach_pronoun_resolutions(index: AtomIndex, pronoun_map: list[dict]) -> None:
-    for entry in pronoun_map:
-        atom_id = entry.get("atom_id")
-        if atom_id not in index.nodes:
-            continue
-        node = index.nodes[atom_id]
-        offset_val = entry.get("offset", [])
-        matched = next(
-            (
-                a
-                for a in _nominal_spans(node.nlp_attributes)
-                if len(offset_val) == 2 and a.offset.start == offset_val[0]
-            ),
-            None,
-        )
-        if matched is None:
-            continue
-        if node.disambiguation is None:
-            node.disambiguation = DisambiguationMetadata(pronoun_map=[])
-        node.disambiguation.pronoun_map.append(
-            PronounResolution(
-                offset=matched.offset,
-                token=entry.get("token", matched.text),
-                referent=entry.get("referent", ""),
-                confidence=float(entry.get("confidence", 1.0)),
-            )
-        )
 
 
 _PREAMBLE = (
@@ -115,8 +90,8 @@ _PREAMBLE = (
 
 
 async def build_batch_prompts(
-    rows: AsyncGenerator[tuple[int, str, list], None],
-) -> AsyncGenerator[tuple[str, list[tuple[int, str, list]]], None]:
+    rows: AsyncGenerator[tuple[int, str, list]],
+) -> AsyncGenerator[tuple[str, list[tuple[int, str, list]]]]:
     tokenizer = llm_tokenizer()
     preamble_tokens = len(tokenizer.encode(_PREAMBLE, add_special_tokens=False))
     budget = LLM_BATCH_TOKEN_LIMIT - preamble_tokens
