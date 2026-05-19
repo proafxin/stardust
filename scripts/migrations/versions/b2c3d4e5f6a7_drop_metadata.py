@@ -16,12 +16,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.drop_column("tree_nodes", "metadata")
-    op.drop_column("atoms", "metadata")
+    pass
+
 
 
 def downgrade() -> None:
-    from sqlalchemy.dialects import postgresql
-    import sqlalchemy as sa
-    op.add_column("tree_nodes", sa.Column("metadata", postgresql.JSONB(), nullable=True))
-    op.add_column("atoms", sa.Column("metadata", postgresql.JSONB(), nullable=True))
+    pass

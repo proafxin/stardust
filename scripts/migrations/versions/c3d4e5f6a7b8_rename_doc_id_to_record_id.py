@@ -16,20 +16,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.alter_column("tree_nodes", "doc_id", new_column_name="record_id")
-    op.alter_column("atoms", "doc_id", new_column_name="record_id")
-    op.alter_column("entity_mentions", "doc_id", new_column_name="record_id")
-    op.drop_index("ix_tree_nodes_doc_id", table_name="tree_nodes")
-    op.drop_index("ix_atoms_doc_id", table_name="atoms")
-    op.create_index("ix_tree_nodes_record_id", "tree_nodes", ["record_id"])
-    op.create_index("ix_atoms_record_id", "atoms", ["record_id"])
+    pass
+
 
 
 def downgrade() -> None:
-    op.alter_column("tree_nodes", "record_id", new_column_name="doc_id")
-    op.alter_column("atoms", "record_id", new_column_name="doc_id")
-    op.alter_column("entity_mentions", "record_id", new_column_name="doc_id")
-    op.drop_index("ix_tree_nodes_record_id", table_name="tree_nodes")
-    op.drop_index("ix_atoms_record_id", table_name="atoms")
-    op.create_index("ix_tree_nodes_doc_id", "tree_nodes", ["doc_id"])
-    op.create_index("ix_atoms_doc_id", "atoms", ["doc_id"])
+    pass

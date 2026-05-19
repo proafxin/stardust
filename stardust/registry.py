@@ -6,9 +6,8 @@ import spacy
 import torch
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from spacy.language import Language
-from transformers import AutoTokenizer
 
-from stardust.config import EMBEDDING_MODEL, LLM_TOKENIZER_MODEL, RERANKER_MODEL, SPACY_MODEL
+from stardust.config import EMBEDDING_MODEL, RERANKER_MODEL, SPACY_MODEL
 
 
 @cache
@@ -27,18 +26,6 @@ def unload_nlp() -> None:
     cupy.get_default_memory_pool().free_all_blocks()
     cupy.get_default_pinned_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
-
-
-@cache
-def llm_tokenizer() -> AutoTokenizer:
-    return AutoTokenizer.from_pretrained(LLM_TOKENIZER_MODEL)
-
-
-def unload_llm_tokenizer() -> None:
-    if not llm_tokenizer.cache_info().currsize:
-        return
-    llm_tokenizer.cache_clear()
-    gc.collect()
 
 
 @cache

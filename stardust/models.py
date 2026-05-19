@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -38,6 +38,7 @@ class Atom(Base):
     record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tree_nodes.id"), nullable=True)
     value: Mapped[str] = mapped_column(Text)
+    value_enriched: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
     value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -53,61 +54,6 @@ class Atom(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
-
-
-class Token(Base):
-    __tablename__ = "tokens"
-
-    atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"), nullable=False, index=True)
-    token_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    start: Mapped[int] = mapped_column(Integer, nullable=False)
-    end: Mapped[int] = mapped_column(Integer, nullable=False)
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-    pos: Mapped[str] = mapped_column(String(16), nullable=False)
-    dep: Mapped[str] = mapped_column(String(32), nullable=False)
-    morph: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    ent_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    ent_iob: Mapped[str | None] = mapped_column(String(4), nullable=True)
-    context: Mapped[str] = mapped_column(Text, nullable=False)
-
-
-class Disambiguation(Base):
-    __tablename__ = "disambiguation"
-
-    token_id: Mapped[int] = mapped_column(Integer, ForeignKey("tokens.id"), nullable=False, index=True)
-    referent_id: Mapped[int] = mapped_column(Integer, ForeignKey("tokens.id"), nullable=False)
-    canonical_token_id: Mapped[int] = mapped_column(Integer, ForeignKey("tokens.id"), nullable=False)
-    atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"), nullable=False, index=True)
-    canonical_entity_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("canonical_entities.id"), nullable=True)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-
-
-class BatchPrompt(Base):
-    __tablename__ = "batch_prompts"
-
-    batch_no: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    prompt: Mapped[str] = mapped_column(Text)
-
-
-class CanonicalEntity(Base):
-    __tablename__ = "canonical_entities"
-
-    canonical_name: Mapped[str] = mapped_column(Text)
-    entity_type: Mapped[str] = mapped_column(String(64))
-    aliases: Mapped[list] = mapped_column(JSONB, default=[])
-
-
-class EntityMention(Base):
-    __tablename__ = "entity_mentions"
-
-    atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"))
-    record_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    canonical_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("canonical_entities.id"), nullable=True)
-    text: Mapped[str] = mapped_column(Text)
-    entity_type: Mapped[str] = mapped_column(String(64))
-    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    raw_offset: Mapped[dict] = mapped_column(JSONB)
-    clean_offset: Mapped[dict] = mapped_column(JSONB)
 
 
 class TableSignal(Base):

@@ -17,13 +17,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "llm_prompts",
-        sa.Column("batch_no", sa.Integer, primary_key=True),
-        sa.Column("prompt", sa.Text, nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-    )
+    pass
+
 
 
 def downgrade() -> None:
-    op.drop_table("llm_prompts")
+    pass

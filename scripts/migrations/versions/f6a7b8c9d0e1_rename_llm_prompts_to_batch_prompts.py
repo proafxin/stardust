@@ -16,8 +16,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.rename_table("llm_prompts", "batch_prompts")
+    pass
+
 
 
 def downgrade() -> None:
-    op.rename_table("batch_prompts", "llm_prompts")
+    pass

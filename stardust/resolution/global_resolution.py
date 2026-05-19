@@ -1,31 +1,48 @@
-import json
 import logging
 
-from stardust.llm import ollama_complete
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+from stardust.config import CANONICALIZATION_THRESHOLD, EMBEDDING_INTERNAL_BATCH_SIZE
 
 log = logging.getLogger(__name__)
 
-_PREAMBLE = (
-    "You are given a list of named entities of the same type. "
-    "Group entities that refer to the same real-world entity. "
-    "Output a single JSON object where each key is the token_id of the canonical (most complete) surface form "
-    "and the value is a list of all token_ids that refer to the same entity (including the canonical one). "
-    "Every token_id must appear in exactly one group.\n"
-    "Example input: PERSON: 1:Barack Obama, 2:Obama, 3:the president, 4:George Bush, 5:Bush\n"
-    'Example output: {"1": [1, 2, 3], "4": [4, 5]}\n\n'
-)
 
-
-async def canonicalize_by_type(ent_type: str, tokens: list[dict]) -> dict[int, list[int]]:
+def canonicalize(tokens: list[dict], embedder: SentenceTransformer) -> dict[int, list[int]]:
     if not tokens:
         return {}
-    tokens_str = ", ".join(f"{t['id']}:{t['text']} ({t['context']})" for t in tokens)
-    prompt = _PREAMBLE + f"{ent_type}: {tokens_str}"
-    raw = await ollama_complete(prompt, max_tokens=max(500, len(tokens) * 20))
-    try:
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
-        return {int(k): [int(v) for v in vs] for k, vs in result.items() if str(k).lstrip("-").isdigit()}
-    except (json.JSONDecodeError, ValueError):
-        log.warning("canonicalize_by_type: failed to parse LLM response for %s: %s", ent_type, raw[:200])
-        return {}
+    texts = [f"{t['text']} {t['context']}" for t in tokens]
+    vecs = embedder.encode(texts, batch_size=EMBEDDING_INTERNAL_BATCH_SIZE, normalize_embeddings=True, show_progress_bar=False)
+    vecs = vecs.astype(np.float32)
+
+    index = faiss.IndexFlatIP(vecs.shape[1])
+    index.add(vecs)
+    k = min(64, len(tokens))
+    distances, indices = index.search(vecs, k)
+
+    assigned = [-1] * len(tokens)
+    canonical_id: int = 0
+    clusters: dict[int, list[int]] = {}
+
+    for i in range(len(tokens)):
+        if assigned[i] != -1:
+            continue
+        cluster_idx = canonical_id
+        canonical_id += 1
+        clusters[cluster_idx] = [i]
+        assigned[i] = cluster_idx
+        for j, dist in zip(indices[i], distances[i], strict=False):
+            if j == i or assigned[j] != -1:
+                continue
+            if dist >= CANONICALIZATION_THRESHOLD:
+                clusters[cluster_idx].append(j)
+                assigned[j] = cluster_idx
+
+    # pick canonical token as the one with longest text (most complete surface form)
+    result: dict[int, list[int]] = {}
+    for members in clusters.values():
+        canonical_i = max(members, key=lambda i: len(tokens[i]["text"]))
+        canonical_token_id = tokens[canonical_i]["id"]
+        result[canonical_token_id] = [tokens[i]["id"] for i in members]
+    return result
