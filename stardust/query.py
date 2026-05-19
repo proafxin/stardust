@@ -30,9 +30,12 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
         # insert in order (parse yields parents before children)
         transient_to_db: dict[int, int] = {}
         for node in nodes:
-            db_parent_id = transient_to_db.get(node.transient_parent_id) if node.transient_parent_id is not None else None
+            db_parent_id = (
+                transient_to_db.get(node.transient_parent_id) if node.transient_parent_id is not None else None
+            )
             result = await session.execute(
-                insert(TreeNodeModel).values(
+                insert(TreeNodeModel)
+                .values(
                     record_id=record_id,
                     parent_id=db_parent_id,
                     node_type=node.node_type,
@@ -42,7 +45,8 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                     clean_offset=node.clean_offset.model_dump(),
                     nlp_attributes=[],
                     disambiguation=None,
-                ).returning(TreeNodeModel.id)
+                )
+                .returning(TreeNodeModel.id)
             )
             db_id = result.scalar_one()
             transient_to_db[node.transient_id] = db_id

@@ -383,18 +383,13 @@ async def _collect_entity_mentions() -> list[tuple[str, list]]:
             if row.record_id not in per_record:
                 per_record[row.record_id] = []
             per_record[row.record_id].append((row.id, row.nlp_attributes, row.disambiguation))
-    return [
-        (record_id, collect_entity_mentions(record_id, rows))
-        for record_id, rows in per_record.items()
-    ]
+    return [(record_id, collect_entity_mentions(record_id, rows)) for record_id, rows in per_record.items()]
 
 
 async def _stream_atom_texts(atom_ids: set[int]) -> dict[int, str]:
     atom_texts: dict[int, str] = {}
     async with SessionLocal() as session, session.begin():
-        stream = await session.stream(
-            select(AtomModel.id, AtomModel.value).where(AtomModel.id.in_(atom_ids))
-        )
+        stream = await session.stream(select(AtomModel.id, AtomModel.value).where(AtomModel.id.in_(atom_ids)))
         async for row in stream:
             atom_texts[row.id] = clean_value(row.value)
     return atom_texts
@@ -432,7 +427,9 @@ async def phase_disambiguation() -> None:
     done = stale = 0
     async with SessionLocal() as read_session, read_session.begin():
         stream = await read_session.stream(
-            select(AtomModel.id, AtomModel.value, AtomModel.value_hash).execution_options(yield_per=EMBEDDING_BATCH_SIZE)
+            select(AtomModel.id, AtomModel.value, AtomModel.value_hash).execution_options(
+                yield_per=EMBEDDING_BATCH_SIZE
+            )
         )
         async for partition in stream.partitions(EMBEDDING_BATCH_SIZE):
             texts, ids, hashes = [], [], []

@@ -24,7 +24,7 @@ def upgrade() -> None:
         op.add_column(table, sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False))
         op.add_column(table, sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False))
 
-    op.execute("ALTER TABLE batch_prompts DROP CONSTRAINT batch_prompts_pkey")
+    op.execute("ALTER TABLE batch_prompts DROP CONSTRAINT llm_prompts_pkey")
     op.add_column("batch_prompts", sa.Column("id", sa.Integer(), autoincrement=True, nullable=False))
     op.execute("CREATE SEQUENCE IF NOT EXISTS batch_prompts_id_seq OWNED BY batch_prompts.id")
     op.execute("ALTER TABLE batch_prompts ALTER COLUMN id SET DEFAULT nextval('batch_prompts_id_seq')")
@@ -45,4 +45,4 @@ def downgrade() -> None:
     op.drop_column("batch_prompts", "updated_at")
     op.execute("ALTER TABLE batch_prompts DROP CONSTRAINT batch_prompts_pkey")
     op.drop_column("batch_prompts", "id")
-    op.create_primary_key("batch_prompts_pkey", "batch_prompts", ["batch_no"])
+    op.create_primary_key("llm_prompts_pkey", "batch_prompts", ["batch_no"])
