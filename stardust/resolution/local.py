@@ -1,8 +1,8 @@
-from collections.abc import Generator
+from collections.abc import AsyncGenerator
 
 from stardust.config import LLM_BATCH_TOKEN_LIMIT, NUMERIC_ENTITY_TYPES
 from stardust.registry import llm_tokenizer
-from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
+from stardust.tree.atom import DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
 
 def _entity_spans(attrs: list[TokenAttributes]) -> list[tuple[str, str, SpanOffset]]:
@@ -114,26 +114,30 @@ _PREAMBLE = (
 )
 
 
-def build_batch_prompts(index: AtomIndex) -> Generator[str, None, None]:
+async def build_batch_prompts(
+    rows: AsyncGenerator[tuple[int, str, list], None],
+) -> AsyncGenerator[tuple[str, list[tuple[int, str, list]]], None]:
     tokenizer = llm_tokenizer()
     preamble_tokens = len(tokenizer.encode(_PREAMBLE, add_special_tokens=False))
     budget = LLM_BATCH_TOKEN_LIMIT - preamble_tokens
     sections: list[str] = []
+    batch_rows: list[tuple[int, str, list]] = []
     batch_tokens = 0
     atom_counter = 0
     token_counter = 0
-    for atom_id in index.atoms:
-        node = index.nodes[atom_id]
-        nominals = _nominal_spans(node.nlp_attributes)
+    async for atom_id, value, nlp_attrs in rows:
+        attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
+        nominals = _nominal_spans(attrs)
         if not nominals:
             continue
-        leaf = node.value.rsplit(" | ", 1)[-1] if " | " in node.value else node.value
+        leaf = value.rsplit(" | ", 1)[-1] if " | " in value else value
         tokens_str = ", ".join(f"{token_counter + j}:{t.text}" for j, t in enumerate(nominals))
         section = f"[{atom_counter}] {leaf}\ntokens: {tokens_str}"
         section_tokens = len(tokenizer.encode(section, add_special_tokens=False))
         if sections and batch_tokens + section_tokens > budget:
-            yield _PREAMBLE + "\n\n".join(sections)
+            yield _PREAMBLE + "\n\n".join(sections), batch_rows
             sections = []
+            batch_rows = []
             batch_tokens = 0
             atom_counter = 0
             token_counter = 0
@@ -141,8 +145,9 @@ def build_batch_prompts(index: AtomIndex) -> Generator[str, None, None]:
             section = f"[0] {leaf}\ntokens: {tokens_str}"
             section_tokens = len(tokenizer.encode(section, add_special_tokens=False))
         sections.append(section)
+        batch_rows.append((atom_id, value, nlp_attrs))
         batch_tokens += section_tokens
         atom_counter += 1
         token_counter += len(nominals)
     if sections:
-        yield _PREAMBLE + "\n\n".join(sections)
+        yield _PREAMBLE + "\n\n".join(sections), batch_rows

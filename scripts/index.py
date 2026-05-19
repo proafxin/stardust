@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import pyarrow.parquet as pq
 import torch
@@ -15,7 +15,6 @@ from sqlalchemy import select, text, update
 from stardust.config import (
     ATOM_TOKEN_LIMIT,
     EMBEDDING_INTERNAL_BATCH_SIZE,
-    LLM_BATCH_TOKEN_LIMIT,
     NLP_COMMIT_BATCH_SIZE,
     settings,
 )
@@ -26,14 +25,12 @@ from stardust.models import AtomModel, LLMPromptModel
 from stardust.parse import _token_count, clean_value, normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
-from stardust.registry import llm_tokenizer as load_llm_tokenizer
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_nlp
 from stardust.resolution.global_resolution import merge_across_records
 from stardust.resolution.local import (
     _nominal_spans,
-    build_batch_prompt,
-    build_pronoun_prompt,
+    build_batch_prompts,
     collect_entity_mentions,
 )
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, Node, SpanOffset, TokenAttributes
@@ -292,27 +289,14 @@ async def phase_nlp() -> None:
 # ── Phase 3: LLM pronoun resolution (Ollama / Qwen3 4B) ─────────────────────
 
 
-async def _process_llm_batch(batch: list[tuple[int, str, list]], batch_idx: int, keep_alive: str = "5m") -> dict:
-    atom_data = []
-    for atom_id, value, nlp_attrs in batch:
-        attrs = [TokenAttributes(**a) for a in (nlp_attrs or [])]
-        entry = build_pronoun_prompt(atom_id, value, attrs)
-        if entry:
-            atom_data.append(entry)
-    if not atom_data:
-        return {}
-    prompt = build_batch_prompt(atom_data)
-    async with SessionLocal() as session:
-        session.add(LLMPromptModel(batch_no=batch_idx, prompt=prompt))
-        await session.commit()
-    raw = await ollama_complete(prompt, max_tokens=max(500, len(atom_data) * 50), keep_alive=keep_alive)
-    try:
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
-        return {str(k): v for k, v in result.items() if str(k).lstrip("-").isdigit() and isinstance(v, int)}
-    except json.JSONDecodeError:
-        log.warning("phase 3: failed to parse LLM response: %s", raw[:200])
-        return {}
+async def _stream_pending_llm_rows() -> AsyncGenerator[tuple[int, str, list], None]:
+    async with SessionLocal() as session, session.begin():
+        stream = await session.stream(
+            select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes)
+            .where(AtomModel.disambiguation.is_(None))
+        )
+        async for row in stream:
+            yield row.id, row.value, row.nlp_attributes
 
 
 async def phase_llm() -> None:
@@ -331,64 +315,30 @@ async def phase_llm() -> None:
             await session.commit()
         log.info("phase 3: loaded %d disambiguation entries from cache", len(cache))
 
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(
-                AtomModel.id,
-                AtomModel.value,
-                AtomModel.nlp_attributes,
-                AtomModel.disambiguation,
-                AtomModel.clean_offset,
+    async def _pending_rows():
+        async with SessionLocal() as session, session.begin():
+            stream = await session.stream(
+                select(AtomModel.id, AtomModel.value, AtomModel.nlp_attributes)
+                .where(AtomModel.disambiguation.is_(None))
             )
-        )
-        rows = result.fetchall()
+            async for row in stream:
+                yield row.id, row.value, row.nlp_attributes
 
-    tokenizer = load_llm_tokenizer()
-    prompt_overhead = len(tokenizer.encode(
-        "Resolve coreference. Output a single JSON object mapping token_id to referent_token_id. "
-        "Only include pronouns or nominals that clearly refer to another token. "
-        "Do not map predicate nominals or role descriptions.\n"
-        "Example: [0] Sarah joined the firm. She became partner.\ntokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
-        "[1] The treaty was signed by France. It came into force.\ntokens: 4:treaty, 5:France, 6:It\n"
-        '=> {"2":0,"6":4}'
-    ))
-
-    batches: list[list[tuple[int, str, list]]] = []
-    current: list[tuple[int, str, list]] = []
-    current_tokens = prompt_overhead
-    nominal_counter = 0
-    for row in rows:
-        if row.disambiguation is not None:
-            continue
-        attrs = [TokenAttributes(**a) for a in (row.nlp_attributes or [])]
-        entry = build_pronoun_prompt(row.id, row.value, attrs)
-        if not entry:
-            continue
-        atom_str = (
-            f"[{len(current)}] {entry['text']}\n"
-            f"tokens: {', '.join(f'{nominal_counter + j}:{t.text}' for j, t in enumerate(entry['nominals']))}"
-        )
-        tokens = len(tokenizer.encode(atom_str))
-        if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT:
-            if current:
-                batches.append(current)
-            current = [(row.id, row.value, row.nlp_attributes)]
-            current_tokens = prompt_overhead + tokens
-            nominal_counter = len(entry["nominals"])
-        else:
-            current.append((row.id, row.value, row.nlp_attributes))
-            current_tokens += tokens
-            nominal_counter += len(entry["nominals"])
-    if current:
-        batches.append(current)
-
-    log.info("phase 3: %d batches", len(batches))
-
-    for i, batch in enumerate(batches):
-        keep_alive = "0" if i == len(batches) - 1 else "5m"
+    i = 0
+    async for prompt, batch in build_batch_prompts(_stream_pending_llm_rows()):
         while True:
             try:
-                pronoun_map = await _process_llm_batch(batch, i, keep_alive)
+                async with SessionLocal() as session:
+                    session.add(LLMPromptModel(batch_no=i, prompt=prompt))
+                    await session.commit()
+                raw = await ollama_complete(prompt, max_tokens=max(500, len(batch) * 50))
+                try:
+                    start, end = raw.find("{"), raw.rfind("}") + 1
+                    result = json.loads(raw[start:end]) if start != -1 and end > 0 else {}
+                    pronoun_map = {str(k): v for k, v in result.items() if str(k).lstrip("-").isdigit() and isinstance(v, int)}
+                except json.JSONDecodeError:
+                    log.warning("phase 3: failed to parse LLM response: %s", raw[:200])
+                    pronoun_map = {}
                 global_tokens: dict[int, tuple[int, TokenAttributes]] = {}
                 token_counter = 0
                 for atom_id, _value, nlp_attrs in batch:
@@ -419,19 +369,15 @@ async def phase_llm() -> None:
                             .values(disambiguation={"pronoun_map": atom_disambig[atom_id]})
                         )
                     await session.commit()
-                log.info(
-                    "phase 3: batch %d/%d done, VRAM free %.2fGB",
-                    i + 1,
-                    len(batches),
-                    torch.cuda.mem_get_info()[0] / 1024**3,
-                )
+                log.info("phase 3: batch %d done, VRAM free %.2fGB", i + 1, torch.cuda.mem_get_info()[0] / 1024**3)
                 break
             except Exception as e:
                 log.warning("phase 3: batch %d failed (%s), retrying in 10s", i + 1, e)
                 await asyncio.sleep(10)
+        i += 1
 
-    log.info("phase 3: done")
     await ollama_unload()
+    log.info("phase 3: done")
 
 
 # ── Phase 4: Disambiguation + embedding ─────────────────────────────────────
