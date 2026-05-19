@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow.parquet as pq
+import cupy
 import torch
 from sqlalchemy import select, text, update
 
@@ -365,6 +366,8 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
         unload_llm_tokenizer()
         await ollama_unload()
         gc.collect()
+        cupy.get_default_memory_pool().free_all_blocks()
+        cupy.get_default_pinned_memory_pool().free_all_blocks()
         torch.cuda.empty_cache()
         await phase_llm()
     unload_embedder()
