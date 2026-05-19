@@ -18,13 +18,14 @@ def clean_value(value: str) -> str:
     return re.sub(r"\s+", " ", raw).strip()
 
 
-HOTPOTQA_LEVELS = ["corpus", "record", "document", "sentence"]
+HOTPOTQA_LEVELS = ["corpus", "record", "document", "text"]
 
 
 @dataclass
 class ParsedNode:
     node: Node
     is_atom: bool
+    sentences: list[str]
 
 
 @dataclass
@@ -157,6 +158,7 @@ async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGen
     yield ParsedNode(
         node=_make_node(corpus_level, corpus_clean, state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None),
         is_atom=False,
+        sentences=[],
     )
     state.index += 1
     state.raw_pos += len(corpus_text)
@@ -168,28 +170,35 @@ async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGen
     yield ParsedNode(
         node=_make_node(record_level, record_value, state.raw_pos, len(record_id), state.clean_pos, len(record_clean), corpus_index),
         is_atom=False,
+        sentences=[],
     )
     state.index += 1
     state.raw_pos += len(record_id)
     state.clean_pos += len(record_clean)
 
-    title: str = record.get("title", "") or ""
-    text: str = record.get("text", "") or ""
-    doc_clean, _ = _clean(title)
-    doc_value = f"{record_value} | {doc_clean}"
-    doc_index = state.index
-    yield ParsedNode(
-        node=_make_node(doc_level, doc_value, state.raw_pos, len(title), state.clean_pos, len(doc_clean), record_index),
-        is_atom=False,
-    )
-    state.index += 1
-    state.raw_pos += len(title)
-    state.clean_pos += len(doc_clean)
+    for title, sentences in record.get("context", []):
+        title_clean, _ = _clean(title)
+        doc_value = f"{record_value} | {title_clean}"
+        doc_index = state.index
+        yield ParsedNode(
+            node=_make_node(doc_level, doc_value, state.raw_pos, len(title), state.clean_pos, len(title_clean), record_index),
+            is_atom=False,
+            sentences=[],
+        )
+        state.index += 1
+        state.raw_pos += len(title)
+        state.clean_pos += len(title_clean)
 
-    if not text.strip():
-        return
-    text_clean, _ = _clean(text)
-    yield ParsedNode(
-        node=_make_node(atom_level, text_clean, state.raw_pos, len(text), state.clean_pos, len(text_clean), doc_index, terminal=True),
-        is_atom=True,
-    )
+        text = " ".join(s.strip() for s in sentences if s.strip())
+        if not text:
+            continue
+        text_clean, _ = _clean(text)
+        clean_sentences = [s.strip() for s in sentences if s.strip()]
+        yield ParsedNode(
+            node=_make_node(atom_level, text_clean, state.raw_pos, len(text), state.clean_pos, len(text_clean), doc_index, terminal=True),
+            is_atom=True,
+            sentences=clean_sentences,
+        )
+        state.index += 1
+        state.raw_pos += len(text)
+        state.clean_pos += len(text_clean)

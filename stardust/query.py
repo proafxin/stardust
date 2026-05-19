@@ -1,26 +1,29 @@
 import operator
 from dataclasses import dataclass
 
+import numpy as np
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import cast, insert, select, text
+from sqlalchemy import cast, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
-from stardust.models import Atom, TableRow, TableSignal, TreeNode
+from stardust.models import Atom, Sentence, TableRow, TableSignal, TreeNode
 from stardust.registry import embedder as load_embedder
 from stardust.registry import reranker as load_reranker
 from stardust.tree.atom import Node
 
 
 @dataclass
-class RankedAtom:
+class RankedSentence:
     id: int
-    record_id: str
-    value: str
+    atom_id: int
+    sentence_idx: int
+    raw_text: str
     score: float
 
 
-async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: AsyncSession) -> None:
+async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: AsyncSession) -> list[int]:
+    atom_ids: list[int] = []
     for record_id, nodes, atom_indices in docs:
         atom_set = set(atom_indices)
         db_ids: list[int] = []
@@ -50,10 +53,29 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                         value=node.value,
                         raw_offset=node.raw_offset.model_dump(),
                         clean_offset=node.clean_offset.model_dump(),
-                        embedding=None,
                     )
                 )
-    await session.commit()
+                atom_ids.append(db_id)
+    return atom_ids
+
+
+async def insert_sentences(atom_id: int, sentences: list[str], session: AsyncSession) -> None:
+    if not sentences:
+        return
+    await session.execute(
+        insert(Sentence),
+        [{"atom_id": atom_id, "sentence_idx": i, "raw_text": s} for i, s in enumerate(sentences)],
+    )
+
+
+async def update_sentence_embedding(
+    sentence_id: int, resolved_text: str, value_hash: str, vec: np.ndarray, session: AsyncSession
+) -> None:
+    await session.execute(
+        update(Sentence)
+        .where(Sentence.id == sentence_id)
+        .values(resolved_text=resolved_text, value_hash=value_hash, embedding=vec.tolist())
+    )
 
 
 async def insert_table_signal(
@@ -75,58 +97,59 @@ async def insert_table_rows(rows: list[tuple[int, int, int, str]], session: Asyn
     )
 
 
-async def dense_search(query: str, session: AsyncSession, record_id: str | None = None) -> list[RankedAtom]:
+async def dense_search(query: str, session: AsyncSession, record_id: str | None = None) -> list[RankedSentence]:
     vec = cast(load_embedder().encode(query, normalize_embeddings=True).tolist(), Vector)
-    distance = Atom.embedding.cosine_distance(vec).label("distance")
+    distance = Sentence.embedding.cosine_distance(vec).label("distance")
     stmt = (
-        select(Atom.id, Atom.record_id, Atom.value, (1 - distance).label("score"))
-        .where(Atom.embedding.is_not(None))
+        select(Sentence.id, Sentence.atom_id, Sentence.sentence_idx, Sentence.raw_text, (1 - distance).label("score"))
+        .where(Sentence.embedding.is_not(None))
         .order_by(distance)
     )
     if record_id:
-        stmt = stmt.where(Atom.record_id == record_id)
+        stmt = stmt.join(Atom, Atom.id == Sentence.atom_id).where(Atom.record_id == record_id)
     rows = (await session.execute(stmt)).fetchall()
-    return [RankedAtom(id=r.id, record_id=r.record_id, value=r.value, score=r.score) for r in rows]
+    return [RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=r.score) for r in rows]
 
 
-async def sparse_search(query: str, session: AsyncSession, record_id: str | None = None) -> list[RankedAtom]:
+async def sparse_search(query: str, session: AsyncSession, record_id: str | None = None) -> list[RankedSentence]:
     rows = (
         await session.execute(
             text("""
-            SELECT id, record_id, value,
-                   paradedb.score(id) AS score
-            FROM atoms
-            WHERE value_enriched @@@ :query
-            AND (:record_id IS NULL OR record_id = :record_id)
+            SELECT s.id, s.atom_id, s.sentence_idx, s.raw_text,
+                   paradedb.score(s.id) AS score
+            FROM sentences s
+            JOIN atoms a ON a.id = s.atom_id
+            WHERE COALESCE(s.resolved_text, s.raw_text) @@@ :query
+            AND (:record_id IS NULL OR a.record_id = :record_id)
             ORDER BY score DESC
         """),
             {"query": query, "record_id": record_id},
         )
     ).fetchall()
-    return [RankedAtom(id=r.id, record_id=r.record_id, value=r.value, score=r.score) for r in rows]
+    return [RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=r.score) for r in rows]
 
 
-def _rrf(dense: list[RankedAtom], sparse: list[RankedAtom], k: int = RRF_K) -> list[RankedAtom]:
+def _rrf(dense: list[RankedSentence], sparse: list[RankedSentence], k: int = RRF_K) -> list[RankedSentence]:
     scores: dict[int, float] = {}
-    all_atoms: dict[int, RankedAtom] = {}
-    for rank, atom in enumerate(dense):
-        scores[atom.id] = scores.get(atom.id, 0.0) + 1.0 / (k + rank + 1)
-        all_atoms[atom.id] = atom
-    for rank, atom in enumerate(sparse):
-        scores[atom.id] = scores.get(atom.id, 0.0) + 1.0 / (k + rank + 1)
-        all_atoms[atom.id] = atom
+    all_sents: dict[int, RankedSentence] = {}
+    for rank, s in enumerate(dense):
+        scores[s.id] = scores.get(s.id, 0.0) + 1.0 / (k + rank + 1)
+        all_sents[s.id] = s
+    for rank, s in enumerate(sparse):
+        scores[s.id] = scores.get(s.id, 0.0) + 1.0 / (k + rank + 1)
+        all_sents[s.id] = s
     ranked = sorted(scores.items(), key=operator.itemgetter(1), reverse=True)
     return [
-        RankedAtom(id=all_atoms[aid].id, record_id=all_atoms[aid].record_id, value=all_atoms[aid].value, score=s)
-        for aid, s in ranked
+        RankedSentence(id=all_sents[sid].id, atom_id=all_sents[sid].atom_id, sentence_idx=all_sents[sid].sentence_idx, raw_text=all_sents[sid].raw_text, score=sc)
+        for sid, sc in ranked
     ]
 
 
-def _rerank(query: str, results: list[RankedAtom], top_k: int) -> list[RankedAtom]:
-    pairs = [(query, r.value) for r in results]
+def _rerank(query: str, results: list[RankedSentence], top_k: int) -> list[RankedSentence]:
+    pairs = [(query, r.raw_text) for r in results]
     scores = load_reranker().predict(pairs)
     reranked = sorted(zip(results, scores, strict=False), key=operator.itemgetter(1), reverse=True)
-    return [RankedAtom(id=r.id, record_id=r.record_id, value=r.value, score=float(s)) for r, s in reranked[:top_k]]
+    return [RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=float(s)) for r, s in reranked[:top_k]]
 
 
 async def retrieve(
@@ -136,7 +159,7 @@ async def retrieve(
     rerank_top_k: int = 5,
     record_id: str | None = None,
     use_reranker: bool = False,
-) -> list[RankedAtom]:
+) -> list[RankedSentence]:
     dense, sparse = (
         await dense_search(query, session, record_id),
         await sparse_search(query, session, record_id),

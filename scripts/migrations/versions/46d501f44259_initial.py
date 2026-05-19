@@ -45,22 +45,12 @@ def upgrade() -> None:
         sa.Column("record_id", sa.String(length=256), nullable=False),
         sa.Column("parent_id", sa.Integer(), nullable=True),
         sa.Column("value", sa.Text(), nullable=False),
-        sa.Column("value_enriched", sa.Text(), nullable=True),
         sa.Column("raw_offset", postgresql.JSONB(), nullable=False),
         sa.Column("clean_offset", postgresql.JSONB(), nullable=False),
-        sa.Column("value_hash", sa.String(length=64), nullable=True),
-        sa.Column("embedding", pgvector.sqlalchemy.Vector(1024), nullable=True),
         sa.ForeignKeyConstraint(["parent_id"], ["tree_nodes.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_atoms_record_id", "atoms", ["record_id"])
-    op.create_index("ix_atoms_value_hash", "atoms", ["value_hash"])
-    op.create_index(
-        "ix_atoms_embedding", "atoms", ["embedding"],
-        postgresql_using="hnsw",
-        postgresql_with={"m": 16, "ef_construction": 64},
-        postgresql_ops={"embedding": "vector_cosine_ops"},
-    )
     op.create_table(
         "table_signals",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -85,13 +75,33 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_table_rows_signal_id", "table_rows", ["signal_id"])
+    op.create_table(
+        "sentences",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("atom_id", sa.Integer(), sa.ForeignKey("atoms.id"), nullable=False),
+        sa.Column("sentence_idx", sa.Integer(), nullable=False),
+        sa.Column("raw_text", sa.Text(), nullable=False),
+        sa.Column("resolved_text", sa.Text(), nullable=True),
+        sa.Column("value_hash", sa.String(64), nullable=True),
+        sa.Column("embedding", pgvector.sqlalchemy.Vector(1024), nullable=True),
+    )
+    op.create_index("ix_sentences_atom_id", "sentences", ["atom_id"])
+    op.create_index(
+        "ix_sentences_embedding", "sentences", ["embedding"],
+        postgresql_using="hnsw",
+        postgresql_with={"m": 16, "ef_construction": 64},
+        postgresql_ops={"embedding": "vector_cosine_ops"},
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_sentences_embedding", table_name="sentences", postgresql_using="hnsw")
+    op.drop_index("ix_sentences_atom_id", table_name="sentences")
+    op.drop_table("sentences")
     op.drop_table("table_rows")
     op.drop_table("table_signals")
-    op.drop_index("ix_atoms_embedding", table_name="atoms", postgresql_using="hnsw")
-    op.drop_index("ix_atoms_value_hash", table_name="atoms")
     op.drop_index("ix_atoms_record_id", table_name="atoms")
     op.drop_table("atoms")
     op.drop_index("ix_tree_nodes_record_id", table_name="tree_nodes")
