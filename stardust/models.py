@@ -57,8 +57,8 @@ class AtomModel(Base):
     )
 
 
-class LLMPromptModel(Base):
-    __tablename__ = "llm_prompts"
+class BatchPromptModel(Base):
+    __tablename__ = "batch_prompts"
 
     batch_no: Mapped[int] = mapped_column(Integer, primary_key=True)
     prompt: Mapped[str] = mapped_column(Text)

@@ -22,7 +22,7 @@ from stardust.config import (
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
-from stardust.models import AtomModel, LLMPromptModel
+from stardust.models import AtomModel, BatchPromptModel
 from stardust.parse import _token_count, clean_value, normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
@@ -330,7 +330,7 @@ async def phase_llm() -> None:
         while True:
             try:
                 async with SessionLocal() as session:
-                    session.add(LLMPromptModel(batch_no=i, prompt=prompt))
+                    session.add(BatchPromptModel(batch_no=i, prompt=prompt))
                     await session.commit()
                 raw = await ollama_complete(prompt, max_tokens=max(500, len(batch) * 50))
                 try:
