@@ -376,7 +376,6 @@ async def phase_llm() -> None:
                 await asyncio.sleep(10)
         i += 1
 
-    await ollama_unload()
     log.info("phase 3: done")
 
 
@@ -510,6 +509,7 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     if not skip_normalize:
         unload_embedder()
         unload_nlp()
+        await ollama_unload()
         gc.collect()
         torch.cuda.empty_cache()
         load_embedder()
@@ -517,6 +517,7 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     if not skip_nlp:
         unload_embedder()
         unload_nlp()
+        await ollama_unload()
         gc.collect()
         torch.cuda.empty_cache()
         load_nlp()
@@ -524,15 +525,22 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     if not skip_llm:
         unload_embedder()
         unload_nlp()
+        await ollama_unload()
         gc.collect()
         torch.cuda.empty_cache()
         await phase_llm()
     unload_embedder()
     unload_nlp()
+    await ollama_unload()
     gc.collect()
     torch.cuda.empty_cache()
     load_embedder()
     await phase_disambiguation()
+    unload_embedder()
+    unload_nlp()
+    await ollama_unload()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
