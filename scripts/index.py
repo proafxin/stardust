@@ -25,7 +25,7 @@ from stardust.parse import _token_count, clean_value, normalize_crag, normalize_
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
-from stardust.registry import unload_embedder, unload_nlp
+from stardust.registry import unload_embedder, unload_llm_tokenizer, unload_nlp
 from stardust.resolution.global_resolution import merge_across_records
 from stardust.resolution.local import (
     _nominal_spans,
@@ -344,6 +344,7 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     if not skip_normalize:
         unload_embedder()
         unload_nlp()
+        unload_llm_tokenizer()
         await ollama_unload()
         gc.collect()
         torch.cuda.empty_cache()
@@ -352,6 +353,7 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     if not skip_nlp:
         unload_embedder()
         unload_nlp()
+        unload_llm_tokenizer()
         await ollama_unload()
         gc.collect()
         torch.cuda.empty_cache()
@@ -360,12 +362,14 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     if not skip_llm:
         unload_embedder()
         unload_nlp()
+        unload_llm_tokenizer()
         await ollama_unload()
         gc.collect()
         torch.cuda.empty_cache()
         await phase_llm()
     unload_embedder()
     unload_nlp()
+    unload_llm_tokenizer()
     await ollama_unload()
     gc.collect()
     torch.cuda.empty_cache()
@@ -373,6 +377,7 @@ async def main(skip_normalize: bool = False, skip_nlp: bool = False, skip_llm: b
     await phase_disambiguation()
     unload_embedder()
     unload_nlp()
+    unload_llm_tokenizer()
     await ollama_unload()
     gc.collect()
     torch.cuda.empty_cache()

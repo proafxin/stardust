@@ -1,5 +1,7 @@
+import gc
 from functools import cache
 
+import cupy
 import spacy
 import torch
 from sentence_transformers import CrossEncoder, SentenceTransformer
@@ -17,23 +19,22 @@ def nlp() -> Language:
 
 def unload_nlp() -> None:
     if nlp.cache_info().currsize:
-        import gc
-
         nlp.cache_clear()
         gc.collect()
         torch.cuda.empty_cache()
-        try:
-            import cupy
-
-            cupy.get_default_memory_pool().free_all_blocks()
-            cupy.get_default_pinned_memory_pool().free_all_blocks()
-        except ImportError:
-            pass
+        cupy.get_default_memory_pool().free_all_blocks()
+        cupy.get_default_pinned_memory_pool().free_all_blocks()
 
 
 @cache
 def llm_tokenizer() -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(LLM_TOKENIZER_MODEL)
+
+
+def unload_llm_tokenizer() -> None:
+    if llm_tokenizer.cache_info().currsize:
+        llm_tokenizer.cache_clear()
+        gc.collect()
 
 
 @cache
