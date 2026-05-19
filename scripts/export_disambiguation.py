@@ -13,9 +13,7 @@ OUT = Path("data/disambiguation_cache.json")
 async def main() -> None:
     async with SessionLocal() as session:
         result = await session.execute(
-            select(Atom.id, Atom.record_id, Atom.disambiguation).where(
-                Atom.disambiguation.is_not(None)
-            )
+            select(Atom.id, Atom.record_id, Atom.disambiguation).where(Atom.disambiguation.is_not(None))
         )
         rows = result.fetchall()
 

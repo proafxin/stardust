@@ -127,13 +127,11 @@ async def phase_nlp() -> None:
             async with SessionLocal() as write_session:
                 async for atom_id, attrs in extract_batch(atom_ids, texts, clean_starts):
                     await write_session.execute(
-                        update(Atom)
-                        .where(Atom.id == atom_id)
-                        .values(nlp_attributes=[a.model_dump() for a in attrs])
+                        update(Atom).where(Atom.id == atom_id).values(nlp_attributes=[a.model_dump() for a in attrs])
                     )
                 await write_session.commit()
             done += len(partition)
-            log.info("phase 2: %d atoms done", done)
+            log.info("phase 2: %d atoms done, VRAM free %.2fGB", done, torch.cuda.mem_get_info()[0] / 1024**3)
 
 
 # ── Phase 3: LLM pronoun resolution (Ollama / Qwen3 4B) ─────────────────────
@@ -167,9 +165,7 @@ async def phase_llm() -> None:
     async def _pending_rows():
         async with SessionLocal() as session, session.begin():
             stream = await session.stream(
-                select(Atom.id, Atom.value, Atom.nlp_attributes).where(
-                    Atom.disambiguation.is_(None)
-                )
+                select(Atom.id, Atom.value, Atom.nlp_attributes).where(Atom.disambiguation.is_(None))
             )
             async for row in stream:
                 yield row.id, row.value, row.nlp_attributes
@@ -237,9 +233,7 @@ async def phase_llm() -> None:
 async def _collect_entity_mentions() -> list[tuple[str, list]]:
     per_record: dict[str, list] = {}
     async with SessionLocal() as session, session.begin():
-        stream = await session.stream(
-            select(Atom.id, Atom.record_id, Atom.nlp_attributes, Atom.disambiguation)
-        )
+        stream = await session.stream(select(Atom.id, Atom.record_id, Atom.nlp_attributes, Atom.disambiguation))
         async for row in stream:
             if row.record_id not in per_record:
                 per_record[row.record_id] = []
@@ -288,9 +282,7 @@ async def phase_disambiguation() -> None:
     done = stale = 0
     async with SessionLocal() as read_session, read_session.begin():
         stream = await read_session.stream(
-            select(Atom.id, Atom.value, Atom.value_hash).execution_options(
-                yield_per=EMBEDDING_BATCH_SIZE
-            )
+            select(Atom.id, Atom.value, Atom.value_hash).execution_options(yield_per=EMBEDDING_BATCH_SIZE)
         )
         async for partition in stream.partitions(EMBEDDING_BATCH_SIZE):
             texts, ids, hashes = [], [], []

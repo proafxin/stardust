@@ -6,7 +6,8 @@ from sqlalchemy import cast, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
-from stardust.models import Atom, CanonicalEntity as CanonicalEntityModel, EntityMention, TreeNode
+from stardust.models import Atom, EntityMention, TreeNode
+from stardust.models import CanonicalEntity as CanonicalEntityModel
 from stardust.registry import embedder as load_embedder
 from stardust.registry import reranker as load_reranker
 from stardust.resolution.global_resolution import CanonicalEntity

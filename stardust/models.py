@@ -12,7 +12,9 @@ from stardust.config import EMBEDDING_DIM
 class Base(DeclarativeBase):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class TreeNode(Base):
@@ -86,6 +88,4 @@ class EntityMention(Base):
     raw_offset: Mapped[dict] = mapped_column(JSONB)
     clean_offset: Mapped[dict] = mapped_column(JSONB)
 
-    canonical_entity: Mapped["CanonicalEntity | None"] = relationship(
-        "CanonicalEntity", back_populates="mentions"
-    )
+    canonical_entity: Mapped["CanonicalEntity | None"] = relationship("CanonicalEntity", back_populates="mentions")
