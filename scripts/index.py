@@ -10,7 +10,8 @@ from typing import Any
 import pyarrow.parquet as pq
 import cupy
 import torch
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text, update, cast
+from sqlalchemy.dialects.postgresql import JSONB
 
 from stardust.config import (
     ATOM_TOKEN_LIMIT,
@@ -141,7 +142,7 @@ async def phase_nlp() -> None:
 async def _stream_pending_llm_rows() -> AsyncGenerator[tuple[int, str, list]]:
     async with SessionLocal() as session, session.begin():
         stream = await session.stream(
-            select(Atom.id, Atom.value, Atom.nlp_attributes).where(Atom.disambiguation.is_(None))
+            select(Atom.id, Atom.value, Atom.nlp_attributes).where(Atom.disambiguation == {})
         )
         async for row in stream:
             yield row.id, row.value, row.nlp_attributes
@@ -157,7 +158,7 @@ async def phase_llm() -> None:
             for entry in cache:
                 await session.execute(
                     update(Atom)
-                    .where(Atom.id == entry["id"], Atom.disambiguation.is_(None))
+                    .where(Atom.id == entry["id"], Atom.disambiguation == {})
                     .values(disambiguation=entry["disambiguation"])
                 )
             await session.commit()
@@ -166,7 +167,7 @@ async def phase_llm() -> None:
     async def _pending_rows():
         async with SessionLocal() as session, session.begin():
             stream = await session.stream(
-                select(Atom.id, Atom.value, Atom.nlp_attributes).where(Atom.disambiguation.is_(None))
+                select(Atom.id, Atom.value, Atom.nlp_attributes).where(Atom.disambiguation == {})
             )
             async for row in stream:
                 yield row.id, row.value, row.nlp_attributes
@@ -271,7 +272,7 @@ async def phase_disambiguation() -> None:
 
     async with SessionLocal() as session, session.begin():
         coref_stream = await session.stream(
-            select(Atom.id, Atom.disambiguation).where(Atom.disambiguation.is_not(None))
+            select(Atom.id, Atom.disambiguation).where(Atom.disambiguation != cast({}, JSONB))
         )
         coref_map: dict[int, list[str]] = {}
         async for row in coref_stream:
