@@ -13,14 +13,12 @@ from sqlalchemy import select, text, update
 from stardust.config import (
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_INTERNAL_BATCH_SIZE,
-    NLP_COMMIT_BATCH_SIZE,
 )
 from stardust.db import SessionLocal
-from stardust.extract import extract_batch
+from stardust.extract import extract_batch, enrich_batch
 from stardust.models import Atom, TreeNode
 from stardust.parse import (
     _parse_md_tables,
-    clean_value,
     normalize_hotpotqa,
 )
 from stardust.query import (
@@ -109,58 +107,64 @@ async def phase_nlp_embed() -> None:
     log.info("phase 2: nlp + embed")
     log.info("phase 2: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-    embedder = load_embedder()
-    done = stale = 0
-
-    async with SessionLocal() as read_session, read_session.begin():
-        stream = await read_session.stream(
-            select(Atom.id, Atom.value, Atom.clean_offset, Atom.value_hash, TreeNode.value.label("ancestry"))
+    # step 1: spaCy over all atoms, store results in memory
+    atom_records: list[tuple[int, str, str]] = []  # (atom_id, text, ancestry)
+    async with SessionLocal() as session, session.begin():
+        stream = await session.stream(
+            select(Atom.id, Atom.value, Atom.value_hash, TreeNode.value.label("ancestry"))
             .join(TreeNode, TreeNode.id == Atom.parent_id)
-            .execution_options(yield_per=NLP_COMMIT_BATCH_SIZE)
         )
-        async for partition in stream.partitions(NLP_COMMIT_BATCH_SIZE):
-            atom_ids = [r.id for r in partition]
-            texts = [r.value for r in partition]
-            clean_starts = [r.clean_offset["start"] for r in partition]
-            old_hashes = [r.value_hash for r in partition]
-            ancestries = [r.ancestry for r in partition]
+        async for row in stream:
+            atom_records.append((row.id, row.value, row.ancestry or ""))
 
-            enriched_map: dict[int, str] = {}
-            async for atom_id, enriched in extract_batch(atom_ids, texts, clean_starts, embedder):
-                enriched_map[atom_id] = enriched
+    texts = [r[1] for r in atom_records]
+    log.info("phase 2: running spaCy on %d atoms", len(texts))
+    all_token_results = extract_batch(texts)
+    log.info("phase 2: spaCy done, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-            id_to_text = dict(zip(atom_ids, texts, strict=False))
-            id_to_ancestry = dict(zip(atom_ids, ancestries, strict=False))
-            ids, embed_texts, hashes = [], [], []
-            for atom_id, old_hash in zip(atom_ids, old_hashes, strict=False):
-                enriched = enriched_map.get(atom_id, clean_value(id_to_text[atom_id]))
-                ancestry = id_to_ancestry[atom_id]
-                enriched = f"{ancestry} | {enriched}" if ancestry else enriched
-                new_hash = hashlib.sha256(enriched.encode()).hexdigest()
-                if old_hash != new_hash:
-                    ids.append(atom_id)
-                    embed_texts.append(enriched)
-                    hashes.append(new_hash)
+    unload_nlp()
+    gc.collect()
+    cupy.get_default_memory_pool().free_all_blocks()
+    torch.cuda.empty_cache()
+    log.info("phase 2: spaCy unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-            if ids:
-                vecs = embedder.encode(
-                    embed_texts,
-                    batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
+    # step 2: enrich + embed in batches
+    embedder = load_embedder()
+    done = embedded = 0
+
+    for batch_start in range(0, len(atom_records), EMBEDDING_BATCH_SIZE):
+        batch = atom_records[batch_start:batch_start + EMBEDDING_BATCH_SIZE]
+        batch_token_results = all_token_results[batch_start:batch_start + EMBEDDING_BATCH_SIZE]
+        batch_texts = [r[1] for r in batch]
+        batch_ancestries = [r[2] for r in batch]
+
+        final_texts = enrich_batch(batch_texts, batch_token_results, embedder)
+
+        ids, embed_texts, hashes = [], [], []
+        for (atom_id, _, _), enriched, ancestry in zip(batch, final_texts, batch_ancestries, strict=False):
+            enriched = f"{ancestry} | {enriched}" if ancestry else enriched
+            new_hash = hashlib.sha256(enriched.encode()).hexdigest()
+            ids.append(atom_id)
+            embed_texts.append(enriched)
+            hashes.append(new_hash)
+
+        vecs = embedder.encode(
+            embed_texts,
+            batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        async with SessionLocal() as write_session:
+            for atom_id, enriched, new_hash, vec in zip(ids, embed_texts, hashes, vecs, strict=False):
+                await write_session.execute(
+                    update(Atom)
+                    .where(Atom.id == atom_id)
+                    .values(value_enriched=enriched, embedding=vec.tolist(), value_hash=new_hash)
                 )
-                async with SessionLocal() as write_session:
-                    for atom_id, enriched, new_hash, vec in zip(ids, embed_texts, hashes, vecs, strict=False):
-                        await write_session.execute(
-                            update(Atom)
-                            .where(Atom.id == atom_id)
-                            .values(value_enriched=enriched, embedding=vec.tolist(), value_hash=new_hash)
-                        )
-                    await write_session.commit()
-                stale += len(ids)
-
-            done += len(partition)
-            log.info("phase 2: %d atoms done, %d stale, VRAM free %.2fGB", done, stale, torch.cuda.mem_get_info()[0] / 1024**3)
+            await write_session.commit()
+        embedded += len(ids)
+        done += len(batch)
+        log.info("phase 2: %d/%d atoms embedded, VRAM free %.2fGB", done, len(atom_records), torch.cuda.mem_get_info()[0] / 1024**3)
 
     async with SessionLocal() as session:
         await session.execute(
@@ -173,6 +177,18 @@ async def phase_nlp_embed() -> None:
         await session.commit()
     log.info("phase 2: hnsw index created")
     log.info("phase 2: done")
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_atoms_embedding ON atoms "
+                "USING hnsw (embedding vector_cosine_ops) "
+                "WITH (m = 16, ef_construction = 64)"
+            )
+        )
+        await session.commit()
+    log.info("phase 3: hnsw index created")
+    log.info("phase 3: done")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -194,7 +210,6 @@ async def main(skip_normalize: bool = False) -> None:
     cupy.get_default_pinned_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
     load_nlp()
-    load_embedder()
     await phase_nlp_embed()
     unload_embedder()
     unload_reranker()
