@@ -353,7 +353,7 @@ async def phase_llm() -> None:
         entry = build_pronoun_prompt(row.id, row.value, attrs)
         if not entry:
             continue
-        tokens = len(entry["text"].split()) + len(entry["nominals"]) * 2
+        tokens = _token_count(entry["text"] + " ".join(f"{current_tokens + j}:{t.text}" for j, t in enumerate(entry["nominals"])))
         if current_tokens + tokens > LLM_BATCH_TOKEN_LIMIT and current:
             batches.append(current)
             current, current_tokens = [(row.id, row.value, row.nlp_attributes)], tokens

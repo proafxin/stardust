@@ -102,7 +102,8 @@ def attach_pronoun_resolutions(index: AtomIndex, pronoun_map: list[dict]) -> Non
 
 
 def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes]) -> dict | None:
-    nominals = _nominal_spans(attrs)
+    leaf_start = value.rfind(" | ") + 3 if " | " in value else 0
+    nominals = [a for a in _nominal_spans(attrs) if a.offset.start >= leaf_start]
     if not nominals:
         return None
     leaf = value.rsplit(" | ", 1)[-1] if " | " in value else value
