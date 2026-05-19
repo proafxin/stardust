@@ -22,7 +22,7 @@ from stardust.config import (
 from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
-from stardust.models import AtomModel
+from stardust.models import AtomModel, LLMPromptModel
 from stardust.parse import _token_count, clean_value, normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
@@ -301,7 +301,9 @@ async def _process_llm_batch(batch: list[tuple[int, str, list]], batch_idx: int,
     if not atom_data:
         return {}
     prompt = build_batch_prompt(atom_data)
-    (Path("prompts") / f"batch_{batch_idx}.md").write_text(prompt)
+    async with SessionLocal() as session:
+        session.add(LLMPromptModel(batch_no=batch_idx, prompt=prompt))
+        await session.commit()
     raw = await ollama_complete(prompt, max_tokens=max(500, len(atom_data) * 50), keep_alive=keep_alive)
     try:
         start, end = raw.find("{"), raw.rfind("}") + 1

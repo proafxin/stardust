@@ -2,6 +2,9 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+from sqlalchemy import DateTime
+from datetime import datetime
 
 from stardust.config import EMBEDDING_DIM
 
@@ -52,6 +55,14 @@ class AtomModel(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
+
+
+class LLMPromptModel(Base):
+    __tablename__ = "llm_prompts"
+
+    batch_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prompt: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class CanonicalEntityModel(Base):

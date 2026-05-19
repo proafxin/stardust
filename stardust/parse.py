@@ -16,6 +16,7 @@ from stardust.index import OffsetMap
 from stardust.registry import embedder
 from stardust.tree.atom import Modality, Node, SpanOffset
 
+
 def clean_value(value: str) -> str:
     raw = value.split(" | ", 1)[-1] if " | " in value else value
     raw = re.sub(r"\b[0-9a-f]{32}\b", "", raw)
@@ -24,7 +25,7 @@ def clean_value(value: str) -> str:
     return re.sub(r"\s+", " ", raw).strip()
 
 
-
+HOTPOTQA_LEVELS = ["corpus", "document", "sentence"]
 QASPER_LEVELS = ["document", "paragraph"]
 CRAG_LEVELS = ["corpus", "page", "section", "paragraph"]
 
@@ -83,11 +84,13 @@ def _extract_text(node: dict) -> str:
     if t == "Image":
         return " ".join(_extract_text(c) for c in (node.get("children") or []))
     if t == "Link":
-        text = " ".join(_extract_text(c) for c in (node.get("children") or []))
-        return text
+        return " ".join(_extract_text(c) for c in (node.get("children") or []))
     if t == "RawText":
         content = html.unescape(node.get("content", ""))
-        return re.sub(r"[\[\]!*_`#>]", "", content)
+        content = re.sub(r"[\[\]!*_`#>]", "", content)
+        content = re.sub(r"\S+\.svg\S*", "", content)
+        content = re.sub(r"/assets/\S*", "", content)
+        return re.sub(r"\s+", " ", content).strip()
     return " ".join(_extract_text(c) for c in (node.get("children") or []))
 
 
