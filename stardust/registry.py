@@ -24,9 +24,9 @@ def unload_nlp() -> None:
     nlp.cache_clear()
     del model
     gc.collect()
-    torch.cuda.empty_cache()
     cupy.get_default_memory_pool().free_all_blocks()
     cupy.get_default_pinned_memory_pool().free_all_blocks()
+    torch.cuda.empty_cache()
 
 
 @cache
