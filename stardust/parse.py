@@ -16,7 +16,15 @@ from stardust.index import OffsetMap
 from stardust.registry import embedder
 from stardust.tree.atom import Modality, Node, SpanOffset
 
-HOTPOTQA_LEVELS = ["corpus", "document", "sentence"]
+def clean_value(value: str) -> str:
+    raw = value.split(" | ", 1)[-1] if " | " in value else value
+    raw = re.sub(r"\b[0-9a-f]{32}\b", "", raw)
+    raw = re.sub(r"https?%3A%2F%2F\S+", "", raw)
+    raw = re.sub(r"https?://\S+", "", raw)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+
 QASPER_LEVELS = ["document", "paragraph"]
 CRAG_LEVELS = ["corpus", "page", "section", "paragraph"]
 
@@ -76,8 +84,7 @@ def _extract_text(node: dict) -> str:
         return " ".join(_extract_text(c) for c in (node.get("children") or []))
     if t == "Link":
         text = " ".join(_extract_text(c) for c in (node.get("children") or []))
-        target = node.get("target", "")
-        return " ".join(filter(None, [text, target]))
+        return text
     if t == "RawText":
         content = html.unescape(node.get("content", ""))
         return re.sub(r"[\[\]!*_`#>]", "", content)

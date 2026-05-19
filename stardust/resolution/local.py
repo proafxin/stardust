@@ -1,4 +1,5 @@
 from stardust.config import NUMERIC_ENTITY_TYPES
+from stardust.parse import clean_value
 from stardust.tree.atom import AtomIndex, DisambiguationMetadata, PronounResolution, SpanOffset, TokenAttributes
 
 
@@ -105,29 +106,25 @@ def build_pronoun_prompt(atom_id: int, value: str, attrs: list[TokenAttributes])
     nominals = _nominal_spans(attrs)
     if not nominals:
         return None
-    return {
-        "atom_id": atom_id,
-        "text": value,
-        "nominals": nominals,
-    }
+    return {"atom_id": atom_id, "text": clean_value(value), "nominals": nominals}
 
 
 def build_batch_prompt(atom_data: list[dict]) -> str:
     if not atom_data:
         return ""
-    lines = []
+    texts = "\n\n".join(a["text"] for a in atom_data)
     token_counter = 0
+    tokens = []
     for a in atom_data:
-        tokens = ", ".join(f"{token_counter + i}:{t.text}" for i, t in enumerate(a["nominals"]))
-        token_counter += len(a["nominals"])
-        lines.append(f"[passage {a['atom_id']}] {a['text']} | tokens: {tokens}")
+        for t in a["nominals"]:
+            tokens.append(f"{token_counter}:{t.text}")
+            token_counter += 1
     examples = (
-        "[passage 12] Sarah joined the firm. She became partner. | tokens: 0:Sarah, 1:firm, 2:She, 3:partner\n"
-        '=> {"2":0,"3":1}\n'
-        "[passage 47] The treaty was signed by France. It came into force. [passage 48] The agreement changed Europe. | tokens: 0:treaty, 1:France, 2:It, 3:agreement, 4:Europe\n"
-        '=> {"2":0,"3":0}'
+        "Sarah joined the firm. She became partner.\n\nThe treaty was signed by France. It came into force.\n\n"
+        "tokens: 0:Sarah, 1:firm, 2:She, 3:partner, 4:treaty, 5:France, 6:It\n"
+        '=> {"2":0,"3":1,"6":4}'
     )
     return (
-        "Resolve coreference across all passages. Output a single JSON object mapping token_id to referent_token_id. Only include tokens where a clear referent exists.\n\n"
-        f"{examples}\n\n" + "\n".join(lines) + "\n=>"
+        "Resolve coreference. Output a JSON object mapping token_id to referent_token_id. Only include tokens where a clear referent exists.\n\n"
+        f"{examples}\n\n{texts}\n\ntokens: {', '.join(tokens)}\n=>"
     )

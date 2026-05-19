@@ -4,7 +4,6 @@ import gc
 import hashlib
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +23,7 @@ from stardust.db import SessionLocal
 from stardust.extract import extract_batch
 from stardust.llm import ollama_complete, ollama_unload
 from stardust.models import AtomModel
-from stardust.parse import _token_count, normalize_crag, normalize_hotpotqa, normalize_qasper
+from stardust.parse import _token_count, clean_value, normalize_crag, normalize_hotpotqa, normalize_qasper
 from stardust.query import insert_canonical_entities, insert_index
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
@@ -462,13 +461,7 @@ async def phase_disambiguation() -> None:
         )
         rows = result.fetchall()
 
-    def _strip_noise(value: str) -> str:
-        s = re.sub(r"\b[0-9a-f]{32}\b", "", value)
-        s = re.sub(r"https?%3A%2F%2F\S+", "", s)
-        s = re.sub(r"https?://\S+", "", s)
-        return re.sub(r"\s+", " ", s).strip()
-
-    atom_texts = {r.id: _strip_noise(r.value.split(" | ", 1)[-1] if " | " in r.value else r.value) for r in rows}
+    atom_texts = {r.id: clean_value(r.value) for r in rows}
 
     global_entities = await merge_across_records(per_record, atom_texts)
     log.info("phase 4: %d canonical entities", len(global_entities))
@@ -480,11 +473,7 @@ async def phase_disambiguation() -> None:
             atom_aliases.setdefault(atom_id, []).extend(entity.aliases)
 
     def _content(value: str) -> str:
-        raw = value.split(" | ", 1)[-1] if " | " in value else value
-        raw = re.sub(r"\b[0-9a-f]{32}\b", "", raw)
-        raw = re.sub(r"https?%3A%2F%2F\S+", "", raw)
-        raw = re.sub(r"https?://\S+", "", raw)
-        return re.sub(r"\s+", " ", raw).strip()
+        return clean_value(value)
 
     coref_map: dict[int, list[str]] = {}
     for r in rows:
