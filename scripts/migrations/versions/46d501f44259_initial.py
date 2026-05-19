@@ -56,7 +56,7 @@ def upgrade() -> None:
     sa.Column('clean_offset', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
     sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
     sa.Column('nlp_attributes', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-    sa.Column('disambiguation', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('disambiguation', postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default='{"pronoun_map": []}'),
     sa.Column('embedding', pgvector.sqlalchemy.vector.VECTOR(dim=1024), nullable=True),
     sa.ForeignKeyConstraint(['parent_id'], ['tree_nodes.id'], ),
     sa.PrimaryKeyConstraint('id')

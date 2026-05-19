@@ -62,3 +62,13 @@ def unload_embedder() -> None:
 @cache
 def reranker() -> CrossEncoder:
     return CrossEncoder(RERANKER_MODEL, device="cuda")
+
+
+def unload_reranker() -> None:
+    if not reranker.cache_info().currsize:
+        return
+    model = reranker()
+    model.model.cpu()
+    del model
+    reranker.cache_clear()
+    torch.cuda.empty_cache()
