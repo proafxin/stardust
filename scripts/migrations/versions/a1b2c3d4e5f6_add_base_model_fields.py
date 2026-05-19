@@ -31,7 +31,6 @@ def upgrade() -> None:
     op.execute("UPDATE batch_prompts SET id = batch_no")
     op.execute("SELECT setval('batch_prompts_id_seq', COALESCE((SELECT MAX(id) FROM batch_prompts), 0) + 1, false)")
     op.create_primary_key("batch_prompts_pkey", "batch_prompts", ["id"])
-    op.add_column("batch_prompts", sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False))
     op.add_column("batch_prompts", sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False))
 
 
@@ -41,7 +40,6 @@ def downgrade() -> None:
         op.drop_column(table, "updated_at")
         op.execute(f"ALTER TABLE {table} ALTER COLUMN id DROP DEFAULT")
 
-    op.drop_column("batch_prompts", "created_at")
     op.drop_column("batch_prompts", "updated_at")
     op.execute("ALTER TABLE batch_prompts DROP CONSTRAINT batch_prompts_pkey")
     op.drop_column("batch_prompts", "id")
