@@ -18,12 +18,15 @@ def nlp() -> Language:
 
 
 def unload_nlp() -> None:
-    if nlp.cache_info().currsize:
-        nlp.cache_clear()
-        gc.collect()
-        torch.cuda.empty_cache()
-        cupy.get_default_memory_pool().free_all_blocks()
-        cupy.get_default_pinned_memory_pool().free_all_blocks()
+    if not nlp.cache_info().currsize:
+        return
+    model = nlp()
+    nlp.cache_clear()
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    cupy.get_default_memory_pool().free_all_blocks()
+    cupy.get_default_pinned_memory_pool().free_all_blocks()
 
 
 @cache
@@ -32,9 +35,10 @@ def llm_tokenizer() -> AutoTokenizer:
 
 
 def unload_llm_tokenizer() -> None:
-    if llm_tokenizer.cache_info().currsize:
-        llm_tokenizer.cache_clear()
-        gc.collect()
+    if not llm_tokenizer.cache_info().currsize:
+        return
+    llm_tokenizer.cache_clear()
+    gc.collect()
 
 
 @cache
@@ -46,12 +50,13 @@ def embedder() -> SentenceTransformer:
 
 
 def unload_embedder() -> None:
-    if embedder.cache_info().currsize:
-        model = embedder()
-        model.cpu()
-        del model
-        embedder.cache_clear()
-        torch.cuda.empty_cache()
+    if not embedder.cache_info().currsize:
+        return
+    model = embedder()
+    model.cpu()
+    del model
+    embedder.cache_clear()
+    torch.cuda.empty_cache()
 
 
 @cache
