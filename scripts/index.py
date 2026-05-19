@@ -254,7 +254,7 @@ async def phase_disambiguation() -> None:
     log.info("phase 4: disambiguation + embedding")
 
     per_record = await _collect_entity_mentions()
-    needed_atom_ids = {atom_id for _, mentions in per_record for _, _, atom_id, _, _ in mentions}
+    needed_atom_ids = {atom_id for _, mentions in per_record for _, _, _, atom_id, _ in mentions}
     atom_texts = await _stream_atom_texts(needed_atom_ids)
 
     log.info("before merge_across_records: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
