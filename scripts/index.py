@@ -123,7 +123,7 @@ async def phase_nlp_embed() -> None:
             for (_, _, raw_text) in sents:
                 all_embed_texts.append(f"{ancestry} | {raw_text}" if ancestry else raw_text)
 
-        vecs_list = [embed_sentences(all_embed_texts[i:i + EMBEDDING_INTERNAL_BATCH_SIZE], embedder) for i in range(0, len(all_embed_texts), EMBEDDING_INTERNAL_BATCH_SIZE)]
+        vecs_list = [embed_sentences(all_embed_texts[i:i + EMBEDDING_INTERNAL_BATCH_SIZE], embedder).cpu().numpy() for i in range(0, len(all_embed_texts), EMBEDDING_INTERNAL_BATCH_SIZE)]
         vecs = np.concatenate(vecs_list, axis=0)
 
         vec_idx = 0
@@ -133,7 +133,7 @@ async def phase_nlp_embed() -> None:
                 for (sent_id, sent_idx, raw_text), _ in zip(sents, sent_results, strict=False):
                     embed_text = all_embed_texts[vec_idx]
                     new_hash = hashlib.sha256(embed_text.encode()).hexdigest()
-                    await update_sentence_embedding(sent_id, embed_text, new_hash, vecs[vec_idx], write_session)
+                    await update_sentence_embedding(sent_id, embed_text, new_hash, vecs[vec_idx].cpu().numpy(), write_session)
                     sent_vecs_map[sent_id] = vecs[vec_idx]
                     vec_idx += 1
             await write_session.commit()
@@ -151,7 +151,7 @@ async def phase_nlp_embed() -> None:
                 for (sent_id, _, _), (_, _, resolved_text, changed) in zip(sents, resolved, strict=False):
                     if not changed:
                         continue
-                    vec = embed_sentences([resolved_text], embedder)[0]
+                    vec = embed_sentences([resolved_text], embedder)[0].cpu().numpy()
                     new_hash = hashlib.sha256(resolved_text.encode()).hexdigest()
                     await update_sentence_embedding(sent_id, resolved_text, new_hash, vec, write_session)
                     updated += 1
