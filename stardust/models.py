@@ -56,7 +56,7 @@ class Sentence(Base):
             "ix_sentences_embedding",
             "embedding",
             postgresql_using="hnsw",
-            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_with={"m": 32, "ef_construction": 128},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )

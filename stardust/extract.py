@@ -8,10 +8,7 @@ from stardust.registry import nlp as load_nlp
 
 def run_nlp(sentences: list[str]) -> list[tuple[bool, list[str]]]:
     nlp_model = load_nlp()
-    results: list[tuple[bool, list[str]]] = [
-        _analyze_doc(doc) for doc in nlp_model.pipe(sentences, batch_size=NLP_BATCH_SIZE)
-    ]
-    return results
+    return [_analyze_doc(doc) for doc in nlp_model.pipe(sentences, batch_size=NLP_BATCH_SIZE)]
 
 
 def _analyze_doc(doc: Doc) -> tuple[bool, list[str]]:
@@ -22,26 +19,30 @@ def _analyze_doc(doc: Doc) -> tuple[bool, list[str]]:
     return has_unresolved, propn_texts
 
 
-def resolve_atom(
-    raw_texts: list[str],
-    resolved_texts: list[str],
-    nlp_results: list[tuple[bool, list[str]]],
-    sent_vecs: np.ndarray,
-) -> tuple[list[str], int]:
-    propn_indices = [i for i, (_, propns) in enumerate(nlp_results) if propns]
-    final_resolved = list(resolved_texts)
+def resolve_atoms(
+    atoms: list[tuple[list[str], list[str], list[tuple[bool, list[str]]]]],
+    all_vecs: np.ndarray,
+) -> tuple[list[list[str]], int]:
     resolvable = 0
-    for i, (has_unresolved, _) in enumerate(nlp_results):
-        if not has_unresolved or not propn_indices:
-            continue
-        scores = np.array([float(sent_vecs[i] @ sent_vecs[j]) for j in propn_indices])
-        best_j = propn_indices[int(np.argmax(scores))]
-        if best_j == i:
-            continue
-        referent_propns = nlp_results[best_j][1]
-        final_resolved[i] = f"{resolved_texts[i]} {' '.join(referent_propns)}"
-        resolvable += 1
-    return final_resolved, resolvable
+    results: list[list[str]] = []
+    offset = 0
+    for raw_texts, resolved_texts, nlp_results in atoms:
+        n = len(raw_texts)
+        sent_vecs = all_vecs[offset : offset + n]
+        offset += n
+        propn_indices = [i for i, (_, propns) in enumerate(nlp_results) if propns]
+        final_resolved = list(resolved_texts)
+        for i, (has_unresolved, _) in enumerate(nlp_results):
+            if not has_unresolved or not propn_indices:
+                continue
+            scores = np.array([float(sent_vecs[i] @ sent_vecs[j]) for j in propn_indices])
+            best_j = propn_indices[int(np.argmax(scores))]
+            if best_j == i:
+                continue
+            final_resolved[i] = f"{resolved_texts[i]} {' '.join(nlp_results[best_j][1])}"
+            resolvable += 1
+        results.append(final_resolved)
+    return results, resolvable
 
 
 def embed_sentences(texts: list[str], embedder: SentenceTransformer) -> np.ndarray:

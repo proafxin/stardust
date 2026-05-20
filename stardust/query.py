@@ -26,37 +26,40 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
     atom_ids: list[int] = []
     for record_id, nodes, atom_indices in docs:
         atom_set = set(atom_indices)
-        db_ids: list[int] = []
-        for i, node in enumerate(nodes):
-            db_parent_id = db_ids[node.parent_index] if node.parent_index is not None else None
-            result = await session.execute(
-                insert(TreeNode)
-                .values(
-                    record_id=record_id,
-                    parent_id=db_parent_id,
-                    node_type=node.node_type,
-                    modality=node.modality.value,
-                    value=node.value,
-                )
-                .returning(TreeNode.id)
-            )
-            db_id = result.scalar_one()
-            db_ids.append(db_id)
-            if i in atom_set:
-                await session.execute(
-                    insert(Atom).values(
-                        id=db_id,
-                        record_id=record_id,
-                        parent_id=db_parent_id,
-                        value=node.value,
-                    )
-                )
-                atom_ids.append(db_id)
+        n = len(nodes)
+        ids_result = await session.execute(text(f"SELECT nextval('tree_nodes_id_seq') FROM generate_series(1, {n})"))
+        pre_ids = [row[0] for row in ids_result.fetchall()]
+        await session.execute(
+            insert(TreeNode),
+            [
+                {
+                    "id": pre_ids[i],
+                    "record_id": record_id,
+                    "parent_id": pre_ids[node.parent_index] if node.parent_index is not None else None,
+                    "node_type": node.node_type,
+                    "modality": node.modality.value,
+                    "value": node.value,
+                }
+                for i, node in enumerate(nodes)
+            ],
+        )
+        atom_rows = [
+            {
+                "id": pre_ids[i],
+                "record_id": record_id,
+                "parent_id": pre_ids[nodes[i].parent_index] if nodes[i].parent_index is not None else None,
+                "value": nodes[i].value,
+            }
+            for i in sorted(atom_set)
+        ]
+        if atom_rows:
+            await session.execute(insert(Atom), atom_rows)
+            atom_ids.extend(pre_ids[i] for i in sorted(atom_set))
     return atom_ids
 
 
 async def insert_sentences(
-    atom_id: int, sentences: list[tuple[str, str, int, np.ndarray]], session: AsyncSession
+    atom_id: int, sentences: list[tuple[str, str, int, str, np.ndarray]], session: AsyncSession
 ) -> None:
     if not sentences:
         return
@@ -77,7 +80,7 @@ async def insert_sentences(
     )
 
 
-async def dense_search(query: str, session: AsyncSession, top_k: int = 100, record_id: str | None = None) -> list[RankedSentence]:
+async def dense_search(query: str, session: AsyncSession, top_k: int = 500, record_id: str | None = None) -> list[RankedSentence]:
     vec = cast(load_embedder().encode(query, normalize_embeddings=True).tolist(), Vector)
     distance = Sentence.embedding.cosine_distance(vec).label("distance")
     stmt = (
@@ -95,21 +98,28 @@ async def dense_search(query: str, session: AsyncSession, top_k: int = 100, reco
     ]
 
 
-async def sparse_search(query: str, session: AsyncSession, record_id: str | None = None) -> list[RankedSentence]:
-    rows = (
-        await session.execute(
-            text("""
+async def sparse_search(query: str, session: AsyncSession, top_k: int = 500, record_id: str | None = None) -> list[RankedSentence]:
+    if record_id:
+        sql = text("""
             SELECT s.id, s.atom_id, s.sentence_idx, s.raw_text,
                    paradedb.score(s.id) AS score
             FROM sentences s
             JOIN atoms a ON a.id = s.atom_id
             WHERE s.resolved_text @@@ :query
-            AND (:record_id IS NULL OR a.record_id = :record_id)
+            AND a.record_id = :record_id
             ORDER BY score DESC
-        """),
-            {"query": query, "record_id": record_id},
-        )
-    ).fetchall()
+            LIMIT :top_k
+        """)
+    else:
+        sql = text("""
+            SELECT s.id, s.atom_id, s.sentence_idx, s.raw_text,
+                   paradedb.score(s.id) AS score
+            FROM sentences s
+            WHERE s.resolved_text @@@ :query
+            ORDER BY score DESC
+            LIMIT :top_k
+        """)
+    rows = (await session.execute(sql, {"query": query, "record_id": record_id, "top_k": top_k})).fetchall()
     return [
         RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=r.score)
         for r in rows
@@ -158,7 +168,7 @@ async def retrieve(
 ) -> list[RankedSentence]:
     dense, sparse = (
         await dense_search(query, session, top_k, record_id),
-        await sparse_search(query, session, record_id),
+        await sparse_search(query, session, top_k, record_id),
     )
     fused = _rrf(dense, sparse)
     candidates = fused[:top_k]

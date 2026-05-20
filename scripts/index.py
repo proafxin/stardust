@@ -12,7 +12,7 @@ import torch
 from sqlalchemy import text
 
 from stardust.db import SessionLocal
-from stardust.extract import embed_sentences, resolve_atom
+from stardust.extract import embed_sentences, resolve_atoms, run_nlp
 from stardust.parse import normalize_hotpotqa
 from stardust.query import insert_index, insert_sentences
 from stardust.registry import embedder as load_embedder
@@ -121,21 +121,28 @@ def resolve_pronouns(
     embedder = load_embedder()
     log.info("resolve: embedder loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-    resolvable = 0
+    atoms_data: list[tuple[list[str], list[str], list[tuple[bool, list[str]]]]] = []
+    atom_keys: list[tuple[int, int]] = []
+    all_raw_texts: list[str] = []
     for (rec_i, atom_i), sent_nlp in needs_resolution:
         sentences = all_records[rec_i][3][atom_i]
         raw_texts = [raw for raw, _ in sentences]
         resolved_texts = [resolved for _, resolved in sentences]
-        raw_vecs = embed_sentences(raw_texts, embedder)
-        updated, atom_resolvable = resolve_atom(raw_texts, resolved_texts, sent_nlp, raw_vecs)
-        resolvable += atom_resolvable
+        atoms_data.append((raw_texts, resolved_texts, sent_nlp))
+        atom_keys.append((rec_i, atom_i))
+        all_raw_texts.extend(raw_texts)
+
+    all_vecs = embed_sentences(all_raw_texts, embedder)
+    updated_list, resolvable = resolve_atoms(atoms_data, all_vecs)
+
+    for (rec_i, atom_i), updated, (raw_texts, _, _) in zip(atom_keys, updated_list, atoms_data, strict=False):
         all_records[rec_i][3][atom_i] = list(zip(raw_texts, updated, strict=False))
 
     unload_embedder()
     gc.collect()
     torch.cuda.empty_cache()
     log.info(
-        "resolve: %d/%d sentences have a candidate referent sentence, embedder unloaded, VRAM free %.2fGB",
+        "resolve: %d/%d sentences resolved, embedder unloaded, VRAM free %.2fGB",
         resolvable,
         total_unresolved_sents,
         torch.cuda.mem_get_info()[0] / 1024**3,
@@ -256,7 +263,7 @@ async def build_hnsw_index() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS ix_sentences_embedding ON sentences "
                 "USING hnsw (embedding vector_cosine_ops) "
-                "WITH (m = 16, ef_construction = 64)"
+                "WITH (m = 32, ef_construction = 128)"
             )
         )
         await session.commit()
