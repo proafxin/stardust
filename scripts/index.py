@@ -167,10 +167,10 @@ async def embed_and_persist(all_records: list[_Record], embedder: Any, token_bud
 
     rows = [(sid, all_vecs[i]) for i, (sid, _) in enumerate(flat)]
     async with SessionLocal() as session:
-        for start in range(0, len(rows), 5000):
-            await insert_embeddings(rows[start: start + 5000], session)
+        for start in range(0, len(rows), 15000):
+            await insert_embeddings(rows[start: start + 15000], session)
             await session.commit()
-            log.info("embed: inserted %d/%d embeddings", min(start + 5000, len(rows)), len(rows))
+            log.info("embed: inserted %d/%d embeddings", min(start + 15000, len(rows)), len(rows))
 
 
 async def drop_hnsw_index() -> None:
