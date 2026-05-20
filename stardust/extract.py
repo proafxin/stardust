@@ -71,11 +71,14 @@ def embed_with_token_budget(texts: list[str], embedder: SentenceTransformer, tok
     all_vecs: list[np.ndarray] = [None] * len(texts)  # type: ignore[list-item]
     batch_indices: list[int] = []
     batch_tokens = 0
+    batches_done = 0
     for i, tc in enumerate(token_counts):
         if batch_tokens + tc > token_budget and batch_indices:
             vecs = embed_sentences([texts[j] for j in batch_indices], embedder)
             for j, vec in zip(batch_indices, vecs, strict=False):
                 all_vecs[j] = vec
+            batches_done += 1
+            log.info("embed: batch %d done (%d sentences, %d tokens)", batches_done, len(batch_indices), batch_tokens)
             batch_indices, batch_tokens = [], 0
         batch_indices.append(i)
         batch_tokens += tc
@@ -83,4 +86,6 @@ def embed_with_token_budget(texts: list[str], embedder: SentenceTransformer, tok
         vecs = embed_sentences([texts[j] for j in batch_indices], embedder)
         for j, vec in zip(batch_indices, vecs, strict=False):
             all_vecs[j] = vec
+        batches_done += 1
+        log.info("embed: batch %d done (%d sentences, %d tokens)", batches_done, len(batch_indices), batch_tokens)
     return np.array(all_vecs)
