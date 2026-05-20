@@ -1,6 +1,6 @@
 [project]
 name = "stardust"
-version = "0.2.0"
+version = "0.2.1"
 description = "Structural Tree of Atomic Retrieval & Disambiguated Universal Span Traceability"
 readme = "README.md"
 authors = [{ name = "Masum Billal", email = "billalmasum93@gmail.com" }]
@@ -12,6 +12,7 @@ dependencies = [
     "datasets>=4.8.5",
     "en-core-web-lg>=3.8.0",
     "fastapi[standard]>=0.136.1",
+    "fastcoref>=2.1.7",
     "httpx>=0.28.1",
     "markdownify>=1.2.2",
     "mistletoe>=1.5.1",
@@ -25,7 +26,7 @@ dependencies = [
     "spacy>=3.8.14",
     "sqlalchemy[asyncio]>=2.0.49",
     "tiktoken>=0.13.0",
-    "torch<=2.11.0",
+    "torch>=2.12.0",
 ]
 [dependency-groups]
 code = [
@@ -50,9 +51,10 @@ url = "https://pypi.nvidia.com"
 explicit = true
 
 [tool.uv.sources]
-# torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
-torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+# torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
 en-core-web-lg = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl" }
+fastcoref = { git = "https://github.com/proafxin/fastcoref", branch = "main" }
 
 
 

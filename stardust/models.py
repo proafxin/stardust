@@ -48,12 +48,20 @@ class Sentence(Base):
     resolved_text: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
+
+    __table_args__ = (Index("ix_sentences_atom_id", "atom_id"),)
+
+
+class SentenceEmbedding(Base):
+    __tablename__ = "sentence_embeddings"
+
+    sentence_id: Mapped[int] = mapped_column(Integer, ForeignKey("sentences.id"), nullable=False, unique=True)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
 
     __table_args__ = (
-        Index("ix_sentences_atom_id", "atom_id"),
+        Index("ix_sentence_embeddings_sentence_id", "sentence_id"),
         Index(
-            "ix_sentences_embedding",
+            "ix_sentence_embeddings_embedding",
             "embedding",
             postgresql_using="hnsw",
             postgresql_with={"m": 32, "ef_construction": 128},

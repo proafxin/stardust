@@ -3,11 +3,11 @@ from dataclasses import dataclass
 
 import numpy as np
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import cast, insert, select, text
+from sqlalchemy import cast, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
-from stardust.models import Atom, Sentence, TreeNode
+from stardust.models import Atom, Sentence, SentenceEmbedding, TreeNode
 from stardust.registry import embedder as load_embedder
 from stardust.registry import reranker as load_reranker
 from stardust.tree.atom import Node
@@ -59,12 +59,12 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
 
 
 async def insert_sentences(
-    atom_id: int, sentences: list[tuple[str, str, int, str, np.ndarray]], session: AsyncSession
-) -> None:
+    atom_id: int, sentences: list[tuple[str, str, int, str]], session: AsyncSession
+) -> list[int]:
     if not sentences:
-        return
-    await session.execute(
-        insert(Sentence),
+        return []
+    result = await session.execute(
+        insert(Sentence).returning(Sentence.id),
         [
             {
                 "atom_id": atom_id,
@@ -73,19 +73,40 @@ async def insert_sentences(
                 "resolved_text": resolved,
                 "token_count": tc,
                 "value_hash": value_hash,
-                "embedding": vec.tolist(),
             }
-            for i, (raw, resolved, tc, value_hash, vec) in enumerate(sentences)
+            for i, (raw, resolved, tc, value_hash) in enumerate(sentences)
         ],
+    )
+    return [row[0] for row in result.fetchall()]
+
+
+async def update_resolved_texts(updates: list[tuple[int, str, int, str]], session: AsyncSession) -> None:
+    if not updates:
+        return
+    await session.execute(
+        update(Sentence),
+        [
+            {"id": sid, "resolved_text": resolved, "token_count": tc, "value_hash": vh}
+            for sid, resolved, tc, vh in updates
+        ],
+    )
+
+
+async def insert_embeddings(rows: list[tuple[int, np.ndarray]], session: AsyncSession) -> None:
+    if not rows:
+        return
+    await session.execute(
+        insert(SentenceEmbedding),
+        [{"sentence_id": sid, "embedding": vec.tolist()} for sid, vec in rows],
     )
 
 
 async def dense_search(query: str, session: AsyncSession, top_k: int = 500, record_id: str | None = None) -> list[RankedSentence]:
     vec = cast(load_embedder().encode(query, normalize_embeddings=True).tolist(), Vector)
-    distance = Sentence.embedding.cosine_distance(vec).label("distance")
+    distance = SentenceEmbedding.embedding.cosine_distance(vec).label("distance")
     stmt = (
         select(Sentence.id, Sentence.atom_id, Sentence.sentence_idx, Sentence.raw_text, (1 - distance).label("score"))
-        .where(Sentence.embedding.is_not(None))
+        .join(SentenceEmbedding, SentenceEmbedding.sentence_id == Sentence.id)
         .order_by(distance)
         .limit(top_k)
     )

@@ -32,19 +32,9 @@ def _clean(raw: str) -> str:
 
 
 def _make_node(
-    node_type: str,
-    value: str,
-    parent_index: int | None,
-    modality: Modality = Modality.TEXT,
-    terminal: bool = False,
+    node_type: str, value: str, parent_index: int | None, modality: Modality = Modality.TEXT, terminal: bool = False
 ) -> Node:
-    return Node(
-        parent_index=parent_index,
-        node_type=node_type,
-        modality=modality,
-        value=value,
-        terminal=terminal,
-    )
+    return Node(parent_index=parent_index, node_type=node_type, modality=modality, value=value, terminal=terminal)
 
 
 async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGenerator[ParsedNode]:
