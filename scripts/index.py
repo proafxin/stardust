@@ -21,6 +21,15 @@ from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_nlp, unload_reranker
 
+TUNING_PATH = Path("tuning.json")
+
+
+def _load_token_budget() -> int | None:
+    if not TUNING_PATH.exists():
+        return None
+    data = json.loads(TUNING_PATH.read_text())
+    return data.get("embedding_token_budget")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -130,10 +139,24 @@ async def phase_nlp_embed() -> None:
             for _, _, raw_text in sents:
                 all_embed_texts.append(f"{ancestry} | {raw_text}" if ancestry else raw_text)
 
-        vecs_list = [
-            embed_sentences(all_embed_texts[i : i + EMBEDDING_INTERNAL_BATCH_SIZE], embedder)
-            for i in range(0, len(all_embed_texts), EMBEDDING_INTERNAL_BATCH_SIZE)
-        ]
+        token_budget = _load_token_budget()
+        if token_budget is not None:
+            tokenizer = embedder.tokenizer
+            batches: list[list[str]] = []
+            current: list[str] = []
+            current_tokens = 0
+            for t in all_embed_texts:
+                tc = len(tokenizer.encode(t, add_special_tokens=True))
+                if current and current_tokens + tc > token_budget:
+                    batches.append(current)
+                    current, current_tokens = [], 0
+                current.append(t)
+                current_tokens += tc
+            if current:
+                batches.append(current)
+        else:
+            batches = [all_embed_texts[i : i + EMBEDDING_INTERNAL_BATCH_SIZE] for i in range(0, len(all_embed_texts), EMBEDDING_INTERNAL_BATCH_SIZE)]
+        vecs_list = [embed_sentences(b, embedder) for b in batches]
         vecs = np.concatenate(vecs_list, axis=0)
 
         vec_idx = 0
