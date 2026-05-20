@@ -1,6 +1,6 @@
 [project]
 name = "stardust"
-version = "0.2.1"
+version = "0.3.0"
 description = "Structural Tree of Atomic Retrieval & Disambiguated Universal Span Traceability"
 readme = "README.md"
 authors = [{ name = "Masum Billal", email = "billalmasum93@gmail.com" }]
@@ -13,7 +13,6 @@ dependencies = [
     "httpx>=0.28.1",
     "pgvector>=0.4.2",
     "pydantic-settings>=2.14.1",
-    "pylatexenc>=2.10",
     "sentence-transformers>=5.5.1",
     "sqlalchemy[asyncio]>=2.0.49",
     "torch>=2.12.0",

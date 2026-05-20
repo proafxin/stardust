@@ -66,8 +66,63 @@ async def _insert_record_batch(
     return records
 
 
+def _build_atom_sentences(resolved_sentences: list[tuple[str, str]]) -> list[tuple[str, str, int, str]]:
+    return [
+        (raw, resolved, 0, hashlib.sha256(resolved.encode()).hexdigest())
+        for raw, resolved in resolved_sentences
+    ]
+
+
 PERSIST_BATCH_SIZE = 10000
 COREF_BATCH_SIZE = 500  # atoms per coref batch
+
+
+async def _process_dataset(
+    dataset: str, data_path: Path, id_prefix: str, coref_model: Any
+) -> list[_Record]:
+    with Path(data_path).open(encoding="utf-8") as f:
+        raw_records = json.load(f)
+
+    pending: list[tuple[str, list[Any], list[int], list[list[tuple[str, str]]]]] = []
+    for i, record in enumerate(raw_records):
+        if N and i >= N:
+            break
+        record_id = record.get("_id", f"{id_prefix}_{i}")
+        parsed_nodes: list[Any] = [p async for p in _NORMALIZER_MAP[id_prefix](record, record_id)]
+        if not parsed_nodes:
+            continue
+        non_atoms = [p.node for p in parsed_nodes if not p.is_atom]
+        atoms = [p for p in parsed_nodes if p.is_atom]
+        all_nodes = non_atoms + [p.node for p in atoms]
+        atom_indices = [len(non_atoms) + j for j in range(len(atoms))]
+        pending.append((record_id, all_nodes, atom_indices, [p.sentences for p in atoms]))
+
+    flat_atoms = [sents for _, _, _, atom_sentences_list in pending for sents in atom_sentences_list]
+    resolved_flat: list[list[tuple[str, str]]] = []
+    for start in range(0, len(flat_atoms), COREF_BATCH_SIZE):
+        resolved_flat.extend(resolve_atoms_coref(flat_atoms[start: start + COREF_BATCH_SIZE], coref_model))
+        log.info("coref: %d/%d atoms resolved", min(start + COREF_BATCH_SIZE, len(flat_atoms)), len(flat_atoms))
+
+    atom_offset = 0
+    db_batch: list[tuple[str, list[Any], list[int], list[list[tuple[str, str, int, str]]]]] = []
+    db_batch_sentences = 0
+    all_records: list[_Record] = []
+
+    for record_id, all_nodes, atom_indices, atom_sentences_list in pending:
+        n_atoms = len(atom_sentences_list)
+        resolved = [_build_atom_sentences(s) for s in resolved_flat[atom_offset: atom_offset + n_atoms]]
+        atom_offset += n_atoms
+        record_sentences = sum(len(s) for s in resolved)
+        if db_batch_sentences + record_sentences > PERSIST_BATCH_SIZE and db_batch:
+            all_records.extend(await _insert_record_batch(db_batch))
+            db_batch, db_batch_sentences = [], 0
+        db_batch.append((record_id, all_nodes, atom_indices, resolved))
+        db_batch_sentences += record_sentences
+
+    if db_batch:
+        all_records.extend(await _insert_record_batch(db_batch))
+    log.info("normalize+persist: %s %d records", dataset, len(pending))
+    return all_records
 
 
 async def normalize_and_persist() -> list[_Record]:
@@ -75,67 +130,8 @@ async def normalize_and_persist() -> list[_Record]:
     log.info("coref: loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     all_records: list[_Record] = []
-
     for dataset, data_path, id_prefix in DATASETS:
-        with Path(data_path).open(encoding="utf-8") as f:
-            raw_records = json.load(f)
-        count = 0
-
-        # collect all parsed atoms before coref
-        pending: list[tuple[str, list[Any], list[int], list[list[tuple[str, str]]]]] = []
-        for i, record in enumerate(raw_records):
-            if N and i >= N:
-                break
-            record_id = record.get("_id", f"{id_prefix}_{i}")
-            parsed_nodes: list[Any] = [p async for p in _NORMALIZER_MAP[id_prefix](record, record_id)]
-            if not parsed_nodes:
-                continue
-            non_atoms = [p.node for p in parsed_nodes if not p.is_atom]
-            atoms = [p for p in parsed_nodes if p.is_atom]
-            all_nodes = non_atoms + [p.node for p in atoms]
-            atom_indices = [len(non_atoms) + j for j in range(len(atoms))]
-            atom_sentences_list = [p.sentences for p in atoms]
-            pending.append((record_id, all_nodes, atom_indices, atom_sentences_list))
-            count += 1
-
-        # resolve coref in batches of atoms
-        flat_atoms: list[list[tuple[str, str]]] = [
-            sents for _, _, _, atom_sentences_list in pending for sents in atom_sentences_list
-        ]
-        resolved_flat: list[list[tuple[str, str]]] = []
-        for start in range(0, len(flat_atoms), COREF_BATCH_SIZE):
-            batch_atoms = flat_atoms[start: start + COREF_BATCH_SIZE]
-            resolved_flat.extend(resolve_atoms_coref(batch_atoms, coref_model))
-            log.info("coref: %d/%d atoms resolved", min(start + COREF_BATCH_SIZE, len(flat_atoms)), len(flat_atoms))
-
-        # distribute resolved sentences back and persist
-        atom_offset = 0
-        db_batch: list[tuple[str, list[Any], list[int], list[list[tuple[str, str, int, str]]]]] = []
-        db_batch_sentences = 0
-
-        for record_id, all_nodes, atom_indices, atom_sentences_list in pending:
-            n_atoms = len(atom_sentences_list)
-            resolved_atom_sentences_list = resolved_flat[atom_offset: atom_offset + n_atoms]
-            atom_offset += n_atoms
-
-            atom_sentences_with_meta: list[list[tuple[str, str, int, str]]] = []
-            for resolved_sentences in resolved_atom_sentences_list:
-                sents = [
-                    (raw, resolved, 0, hashlib.sha256(resolved.encode()).hexdigest())
-                    for raw, resolved in resolved_sentences
-                ]
-                atom_sentences_with_meta.append(sents)
-
-            record_sentences = sum(len(s) for s in atom_sentences_with_meta)
-            if db_batch_sentences + record_sentences > PERSIST_BATCH_SIZE and db_batch:
-                all_records.extend(await _insert_record_batch(db_batch))
-                db_batch, db_batch_sentences = [], 0
-            db_batch.append((record_id, all_nodes, atom_indices, atom_sentences_with_meta))
-            db_batch_sentences += record_sentences
-
-        if db_batch:
-            all_records.extend(await _insert_record_batch(db_batch))
-        log.info("normalize+persist: %s %d records", dataset, count)
+        all_records.extend(await _process_dataset(dataset, data_path, id_prefix, coref_model))
 
     unload_coref()
     gc.collect()

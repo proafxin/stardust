@@ -22,7 +22,7 @@ CONFIG_PATH = Path("tuning.json")
 async def get_all_words() -> list[str]:
     async with SessionLocal() as session:
         rows = (await session.execute(select(Sentence.resolved_text))).fetchall()
-    return " ".join(r.raw_text for r in rows).split()
+    return " ".join(r.resolved_text for r in rows).split()
 
 
 def try_batch(embedder, text: str) -> bool:
