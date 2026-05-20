@@ -4,16 +4,22 @@ from functools import cache
 import cupy
 import spacy
 import torch
+from fastcoref import spacy_component  # noqa: F401
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from spacy.language import Language
 
-from stardust.config import EMBEDDING_MODEL, RERANKER_MODEL, SPACY_MODEL
+from stardust.config import COREF_MODEL, EMBEDDING_MODEL, RERANKER_MODEL, SPACY_MODEL
 
 
 @cache
 def nlp() -> Language:
-    spacy.prefer_gpu()
-    return spacy.load(SPACY_MODEL, enable=["tagger", "parser", "attribute_ruler"])
+    model = spacy.load(SPACY_MODEL, enable=["tagger", "parser", "attribute_ruler"])
+    model.add_pipe("fastcoref", config={
+        "model_architecture": "LingMessCoref",
+        "model_path": COREF_MODEL,
+        "device": "cuda",
+    })
+    return model
 
 
 def unload_nlp() -> None:
