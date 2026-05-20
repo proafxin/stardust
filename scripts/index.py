@@ -109,9 +109,9 @@ def resolve_pronouns(
     all_records: list[_RawRecord],
     atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]],
 ) -> list[_RawRecord]:
-    needs_resolution = [(k, v) for k, v in atom_nlp.items() if any(hu for hu, _ in v)]
+    needs_resolution = [(k, v) for k, v in atom_nlp.items() if any(morphs for morphs, _ in v)]
     total_sents = sum(len(v) for v in atom_nlp.values())
-    total_unresolved_sents = sum(sum(1 for hu, _ in v if hu) for _, v in needs_resolution)
+    total_unresolved_sents = sum(sum(1 for morphs, _ in v if morphs) for _, v in needs_resolution)
     log.info(
         "resolve: %d/%d sentences need resolution across %d atoms",
         total_unresolved_sents,
@@ -128,7 +128,7 @@ def resolve_pronouns(
         sentences = all_records[rec_i][3][atom_i]
         raw_texts = [raw for raw, _ in sentences]
         resolved_texts = [resolved for _, resolved in sentences]
-        embed_indices = [i for i, (hu, propns) in enumerate(sent_nlp) if hu or propns]
+        embed_indices = [i for i, (unresolved_morphs, propns) in enumerate(sent_nlp) if unresolved_morphs or propns]
         atoms_data.append((raw_texts, resolved_texts, sent_nlp, embed_indices))
         atom_keys.append((rec_i, atom_i))
         all_raw_texts.extend(raw_texts[i] for i in embed_indices)
