@@ -71,7 +71,7 @@ async def normalize_records() -> list[_RawRecord]:
             atom_sentences = [p.sentences for p in atoms]
             all_records.append((record_id, all_nodes, atom_indices, atom_sentences))
             count += 1
-        log.info("normalized %s: %d records", dataset, count)
+        log.info("normalize: %s %d records", dataset, count)
     return all_records
 
 
@@ -85,8 +85,9 @@ def run_spacy(all_records: list[_RawRecord]) -> dict[tuple[int, int], list[tuple
                 flat_raw.append(raw)
                 flat_index.append((rec_i, atom_i))
 
-    log.info("running spaCy on %d sentences", len(flat_raw))
+    log.info("spaCy: running on %d sentences", len(flat_raw))
     nlp_results = run_nlp(flat_raw)
+    log.info("spaCy: done")
 
     atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]] = {}
     for flat_i, (rec_i, atom_i) in enumerate(flat_index):
@@ -101,12 +102,12 @@ def resolve_pronouns(
     all_records: list[_RawRecord],
     atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]],
 ) -> list[_RawRecord]:
+    needs_resolution = [(k, v) for k, v in atom_nlp.items() if any(hu for hu, _ in v)]
+    log.info("resolve: %d atoms need pronoun resolution", len(needs_resolution))
     embedder = load_embedder()
-    log.info("embedder loaded for resolution, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("resolve: embedder loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-    for (rec_i, atom_i), sent_nlp in atom_nlp.items():
-        if not any(has_unresolved for has_unresolved, _ in sent_nlp):
-            continue
+    for (rec_i, atom_i), sent_nlp in needs_resolution:
         sentences = all_records[rec_i][3][atom_i]
         raw_texts = [raw for raw, _ in sentences]
         resolved_texts = [resolved for _, resolved in sentences]
@@ -117,14 +118,13 @@ def resolve_pronouns(
     unload_embedder()
     gc.collect()
     torch.cuda.empty_cache()
-    log.info("resolution done, embedder unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("resolve: done, embedder unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
     return all_records
 
 
 def embed_and_finalize(all_records: list[_RawRecord]) -> list[_FinalRecord]:
     token_budget = _load_token_budget()
 
-    # flatten all (rec_i, atom_i, sent_i, resolved) for indexed access
     flat: list[tuple[int, int, int, str]] = []
     for rec_i, (_, _, _, atom_sentences_list) in enumerate(all_records):
         for atom_i, sentences in enumerate(atom_sentences_list):
@@ -132,20 +132,22 @@ def embed_and_finalize(all_records: list[_RawRecord]) -> list[_FinalRecord]:
                 flat.append((rec_i, atom_i, sent_i, resolved))
 
     embedder = load_embedder()
-    log.info("embedding %d resolved texts, VRAM free %.2fGB", len(flat), torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("embed: %d resolved texts, VRAM free %.2fGB", len(flat), torch.cuda.mem_get_info()[0] / 1024**3)
 
-    # tokenize all at once to get counts, then embed in token-budget batches
     all_resolved = [resolved for _, _, _, resolved in flat]
     all_token_counts = [len(ids) for ids in embedder.tokenizer(all_resolved, add_special_tokens=True)["input_ids"]]
 
     all_vecs: list[np.ndarray] = [None] * len(flat)  # type: ignore[list-item]
     batch_indices: list[int] = []
     batch_tokens = 0
+    batches_done = 0
     for i, tc in enumerate(all_token_counts):
         if batch_tokens + tc > token_budget and batch_indices:
             vecs = embed_sentences([all_resolved[j] for j in batch_indices], embedder)
             for j, vec in zip(batch_indices, vecs, strict=False):
                 all_vecs[j] = vec
+            batches_done += 1
+            log.info("embed: batch %d done (%d sentences, %d tokens), VRAM free %.2fGB", batches_done, len(batch_indices), batch_tokens, torch.cuda.mem_get_info()[0] / 1024**3)
             batch_indices, batch_tokens = [], 0
         batch_indices.append(i)
         batch_tokens += tc
@@ -153,13 +155,14 @@ def embed_and_finalize(all_records: list[_RawRecord]) -> list[_FinalRecord]:
         vecs = embed_sentences([all_resolved[j] for j in batch_indices], embedder)
         for j, vec in zip(batch_indices, vecs, strict=False):
             all_vecs[j] = vec
+        batches_done += 1
+        log.info("embed: batch %d done (%d sentences, %d tokens), VRAM free %.2fGB", batches_done, len(batch_indices), batch_tokens, torch.cuda.mem_get_info()[0] / 1024**3)
 
     unload_embedder()
     gc.collect()
     torch.cuda.empty_cache()
-    log.info("embedding done, embedder unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("embed: done (%d batches), embedder unloaded, VRAM free %.2fGB", batches_done, torch.cuda.mem_get_info()[0] / 1024**3)
 
-    # reassemble into _FinalRecord structure
     vec_map: dict[tuple[int, int, int], tuple[int, np.ndarray]] = {
         (rec_i, atom_i, sent_i): (all_token_counts[fi], all_vecs[fi])
         for fi, (rec_i, atom_i, sent_i, _) in enumerate(flat)
@@ -224,6 +227,7 @@ async def build_hnsw_index() -> None:
 
 
 async def main() -> None:
+    log.info("stardust index: start")
     unload_embedder()
     unload_reranker()
     unload_nlp()
@@ -231,17 +235,18 @@ async def main() -> None:
     cupy.get_default_memory_pool().free_all_blocks()
     cupy.get_default_pinned_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
+    log.info("VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     all_records = await normalize_records()
 
     load_nlp()
-    log.info("spaCy loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("spaCy: loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
     atom_nlp = run_spacy(all_records)
     unload_nlp()
     gc.collect()
     cupy.get_default_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
-    log.info("spaCy unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("spaCy: unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     all_records = resolve_pronouns(all_records, atom_nlp)
     final_records = embed_and_finalize(all_records)
@@ -254,6 +259,7 @@ async def main() -> None:
     unload_nlp()
     gc.collect()
     torch.cuda.empty_cache()
+    log.info("stardust index: done")
 
 
 if __name__ == "__main__":
