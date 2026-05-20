@@ -1,36 +1,24 @@
 import gc
 from functools import cache
 
-import cupy
-import spacy
 import torch
-from fastcoref import spacy_component  # noqa: F401
+from fastcoref import LingMessCoref
 from sentence_transformers import CrossEncoder, SentenceTransformer
-from spacy.language import Language
 
-from stardust.config import COREF_MODEL, EMBEDDING_MODEL, RERANKER_MODEL, SPACY_MODEL
+from stardust.config import COREF_MODEL, EMBEDDING_MODEL, RERANKER_MODEL
 
 
 @cache
-def nlp() -> Language:
-    model = spacy.load(SPACY_MODEL, enable=["tagger", "parser", "attribute_ruler"])
-    model.add_pipe("fastcoref", config={
-        "model_architecture": "LingMessCoref",
-        "model_path": COREF_MODEL,
-        "device": "cuda",
-    })
-    return model
+def coref() -> LingMessCoref:
+    return LingMessCoref(model_name_or_path=COREF_MODEL, device="cuda")
 
 
-def unload_nlp() -> None:
-    if not nlp.cache_info().currsize:
+def unload_coref() -> None:
+    if not coref.cache_info().currsize:
         return
-    model = nlp()
-    nlp.cache_clear()
+    model = coref()
+    coref.cache_clear()
     del model
-    gc.collect()
-    cupy.get_default_memory_pool().free_all_blocks()
-    cupy.get_default_pinned_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
 
 

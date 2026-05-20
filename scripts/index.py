@@ -6,18 +6,16 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import cupy
-import numpy as np
 import torch
 from sqlalchemy import text
 
 from stardust.db import SessionLocal
-from stardust.extract import embed_with_token_budget, resolve_atom_coref
+from stardust.extract import embed_with_token_budget, resolve_atoms_coref
 from stardust.parse import normalize_hotpotqa
 from stardust.query import insert_embeddings, insert_index, insert_sentences, update_resolved_texts
+from stardust.registry import coref as load_coref
 from stardust.registry import embedder as load_embedder
-from stardust.registry import nlp as load_nlp
-from stardust.registry import unload_embedder, unload_nlp
+from stardust.registry import unload_coref, unload_embedder
 
 TUNING_PATH = Path("tuning.json")
 
@@ -35,15 +33,8 @@ _NORMALIZER_MAP = {
     "hotpotqa": normalize_hotpotqa,
 }
 
-# per atom: list of (raw, resolved, sentence_db_id)
 _AtomSentences = list[tuple[str, str, int]]
 _Record = tuple[str, list[Any], list[int], list[_AtomSentences]]
-
-
-def _vram_free_gb() -> float:
-    free_torch, _ = torch.cuda.mem_get_info()
-    cupy_used = cupy.get_default_memory_pool().used_bytes()
-    return (free_torch - cupy_used) / 1024**3
 
 
 def _load_token_budget() -> int:
@@ -76,20 +67,22 @@ async def _insert_record_batch(
 
 
 PERSIST_BATCH_SIZE = 10000
+COREF_BATCH_SIZE = 500  # atoms per coref batch
 
 
 async def normalize_and_persist() -> list[_Record]:
-    nlp = load_nlp()
-    log.info("spaCy+coref: loaded, VRAM free %.2fGB", _vram_free_gb())
+    coref_model = load_coref()
+    log.info("coref: loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+
     all_records: list[_Record] = []
 
     for dataset, data_path, id_prefix in DATASETS:
         with Path(data_path).open(encoding="utf-8") as f:
             raw_records = json.load(f)
         count = 0
-        batch: list[tuple[str, list[Any], list[int], list[list[tuple[str, str, int, str]]]]] = []
-        batch_sentences = 0
 
+        # collect all parsed atoms before coref
+        pending: list[tuple[str, list[Any], list[int], list[list[tuple[str, str]]]]] = []
         for i, record in enumerate(raw_records):
             if N and i >= N:
                 break
@@ -101,34 +94,53 @@ async def normalize_and_persist() -> list[_Record]:
             atoms = [p for p in parsed_nodes if p.is_atom]
             all_nodes = non_atoms + [p.node for p in atoms]
             atom_indices = [len(non_atoms) + j for j in range(len(atoms))]
-
-            atom_sentences_list: list[list[tuple[str, str, int, str]]] = []
-            for p in atoms:
-                resolved_sentences = resolve_atom_coref(p.sentences, nlp)
-                sents = []
-                for raw, resolved in resolved_sentences:
-                    tc = 0  # computed after resolution during embed phase
-                    vh = hashlib.sha256(resolved.encode()).hexdigest()
-                    sents.append((raw, resolved, tc, vh))
-                atom_sentences_list.append(sents)
-
-            record_sentences = sum(len(s) for s in atom_sentences_list)
-            if batch_sentences + record_sentences > PERSIST_BATCH_SIZE and batch:
-                all_records.extend(await _insert_record_batch(batch))
-                batch, batch_sentences = [], 0
-            batch.append((record_id, all_nodes, atom_indices, atom_sentences_list))
-            batch_sentences += record_sentences
+            atom_sentences_list = [p.sentences for p in atoms]
+            pending.append((record_id, all_nodes, atom_indices, atom_sentences_list))
             count += 1
 
-        if batch:
-            all_records.extend(await _insert_record_batch(batch))
+        # resolve coref in batches of atoms
+        flat_atoms: list[list[tuple[str, str]]] = [
+            sents for _, _, _, atom_sentences_list in pending for sents in atom_sentences_list
+        ]
+        resolved_flat: list[list[tuple[str, str]]] = []
+        for start in range(0, len(flat_atoms), COREF_BATCH_SIZE):
+            batch_atoms = flat_atoms[start: start + COREF_BATCH_SIZE]
+            resolved_flat.extend(resolve_atoms_coref(batch_atoms, coref_model))
+            log.info("coref: %d/%d atoms resolved", min(start + COREF_BATCH_SIZE, len(flat_atoms)), len(flat_atoms))
+
+        # distribute resolved sentences back and persist
+        atom_offset = 0
+        db_batch: list[tuple[str, list[Any], list[int], list[list[tuple[str, str, int, str]]]]] = []
+        db_batch_sentences = 0
+
+        for record_id, all_nodes, atom_indices, atom_sentences_list in pending:
+            n_atoms = len(atom_sentences_list)
+            resolved_atom_sentences_list = resolved_flat[atom_offset: atom_offset + n_atoms]
+            atom_offset += n_atoms
+
+            atom_sentences_with_meta: list[list[tuple[str, str, int, str]]] = []
+            for resolved_sentences in resolved_atom_sentences_list:
+                sents = [
+                    (raw, resolved, 0, hashlib.sha256(resolved.encode()).hexdigest())
+                    for raw, resolved in resolved_sentences
+                ]
+                atom_sentences_with_meta.append(sents)
+
+            record_sentences = sum(len(s) for s in atom_sentences_with_meta)
+            if db_batch_sentences + record_sentences > PERSIST_BATCH_SIZE and db_batch:
+                all_records.extend(await _insert_record_batch(db_batch))
+                db_batch, db_batch_sentences = [], 0
+            db_batch.append((record_id, all_nodes, atom_indices, atom_sentences_with_meta))
+            db_batch_sentences += record_sentences
+
+        if db_batch:
+            all_records.extend(await _insert_record_batch(db_batch))
         log.info("normalize+persist: %s %d records", dataset, count)
 
-    unload_nlp()
+    unload_coref()
     gc.collect()
-    cupy.get_default_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
-    log.info("spaCy+coref: unloaded, VRAM free %.2fGB", _vram_free_gb())
+    log.info("coref: unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
     return all_records
 
 
@@ -184,11 +196,9 @@ async def build_hnsw_index() -> None:
 
 async def main() -> None:
     log.info("stardust index: start")
+    unload_coref()
     unload_embedder()
-    unload_nlp()
     gc.collect()
-    cupy.get_default_memory_pool().free_all_blocks()
-    cupy.get_default_pinned_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
     log.info("VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 

@@ -8,8 +8,6 @@ class Settings(BaseSettings):
     postgres_db: str
     postgres_user: str
     postgres_password: str
-    redis_port: int = 6379
-    redis_host: str = "localhost"
     ollama_host: str = "localhost"
     ollama_port: int = 11434
 
@@ -21,7 +19,6 @@ class Settings(BaseSettings):
         )
 
 
-SPACY_MODEL = "en_core_web_lg"
 COREF_MODEL = "biu-nlp/lingmess-coref"
 EMBEDDING_MODEL = "BAAI/bge-m3"
 EMBEDDING_DIM = 1024

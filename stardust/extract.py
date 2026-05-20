@@ -2,68 +2,72 @@ import logging
 import re
 
 import numpy as np
+from fastcoref import LingMessCoref
 from sentence_transformers import SentenceTransformer
-from spacy.language import Language
 
 log = logging.getLogger(__name__)
 
 _PRON = re.compile(r"\b(he|she|it|they|him|her|them|his|hers|its|their|theirs|himself|herself|itself|themselves)\b", re.IGNORECASE)
 
 
-def resolve_atom_coref(sentences: list[tuple[str, str]], nlp: Language) -> list[tuple[str, str]]:
-    atom_text = " ".join(raw for raw, _ in sentences)
-    doc = nlp(atom_text)
-    clusters = doc._.coref_clusters
-    if not clusters:
-        return sentences
+def resolve_atoms_coref(
+    atoms: list[list[tuple[str, str]]],
+    coref_model: LingMessCoref,
+    max_tokens_in_batch: int = 10000,
+) -> list[list[tuple[str, str]]]:
+    atom_texts = [" ".join(raw for raw, _ in sents) for sents in atoms]
+    preds = coref_model.predict(texts=atom_texts, max_tokens_in_batch=max_tokens_in_batch)
 
-    # build map: char_start -> canonical text (first mention in cluster)
-    pron_to_canonical: dict[tuple[int, int], str] = {}
-    for cluster in clusters:
-        canonical = atom_text[cluster[0][0]:cluster[0][1]]
-        for start, end in cluster[1:]:
-            span_text = atom_text[start:end]
-            if _PRON.fullmatch(span_text.strip()):
-                pron_to_canonical[(start, end)] = canonical
-
-    if not pron_to_canonical:
-        return sentences
-
-    # map each sentence to its char offset in atom_text
-    updated: list[tuple[str, str]] = []
-    offset = 0
-    for raw, resolved in sentences:
-        sent_start = offset
-        sent_end = offset + len(raw)
-        offset = sent_end + 1  # +1 for the space separator
-
-        # find pronouns in this sentence that have a canonical resolution
-        replacements = [
-            (start - sent_start, end - sent_start, canonical)
-            for (start, end), canonical in pron_to_canonical.items()
-            if sent_start <= start < sent_end
-        ]
-
-        if not replacements:
-            updated.append((raw, resolved))
+    results: list[list[tuple[str, str]]] = []
+    for atom_text, sentences, pred in zip(atom_texts, atoms, preds, strict=False):
+        clusters = pred.get_clusters(as_strings=False)
+        if not clusters:
+            results.append(sentences)
             continue
 
-        # apply replacements right-to-left to preserve offsets
-        new_resolved = resolved
-        # resolved_text has ancestry prefix + raw, find where raw starts in resolved
-        raw_in_resolved = resolved.rfind(raw)
-        if raw_in_resolved == -1:
-            updated.append((raw, resolved))
+        pron_to_canonical: dict[tuple[int, int], str] = {}
+        for cluster in clusters:
+            canonical = atom_text[cluster[0][0]:cluster[0][1]]
+            for start, end in cluster[1:]:
+                if _PRON.fullmatch(atom_text[start:end].strip()):
+                    pron_to_canonical[(start, end)] = canonical
+
+        if not pron_to_canonical:
+            results.append(sentences)
             continue
 
-        for r_start, r_end, canonical in sorted(replacements, reverse=True):
-            abs_start = raw_in_resolved + r_start
-            abs_end = raw_in_resolved + r_end
-            new_resolved = new_resolved[:abs_start] + canonical + new_resolved[abs_end:]
+        updated: list[tuple[str, str]] = []
+        offset = 0
+        for raw, resolved in sentences:
+            sent_start = offset
+            sent_end = offset + len(raw)
+            offset = sent_end + 1
 
-        updated.append((raw, new_resolved))
+            replacements = [
+                (start - sent_start, end - sent_start, canonical)
+                for (start, end), canonical in pron_to_canonical.items()
+                if sent_start <= start < sent_end
+            ]
 
-    return updated
+            if not replacements:
+                updated.append((raw, resolved))
+                continue
+
+            raw_in_resolved = resolved.rfind(raw)
+            if raw_in_resolved == -1:
+                updated.append((raw, resolved))
+                continue
+
+            new_resolved = resolved
+            for r_start, r_end, canonical in sorted(replacements, reverse=True):
+                abs_start = raw_in_resolved + r_start
+                abs_end = raw_in_resolved + r_end
+                new_resolved = new_resolved[:abs_start] + canonical + new_resolved[abs_end:]
+
+            updated.append((raw, new_resolved))
+
+        results.append(updated)
+    return results
 
 
 def embed_sentences(texts: list[str], embedder: SentenceTransformer) -> np.ndarray:
