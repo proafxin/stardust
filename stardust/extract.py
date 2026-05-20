@@ -53,3 +53,23 @@ def embed_sentences(texts: list[str], embedder: SentenceTransformer) -> np.ndarr
         show_progress_bar=False,
         convert_to_numpy=True,
     )
+
+
+def embed_with_token_budget(texts: list[str], embedder: SentenceTransformer, token_budget: int) -> np.ndarray:
+    token_counts = [len(ids) for ids in embedder.tokenizer(texts, add_special_tokens=True)["input_ids"]]
+    all_vecs: list[np.ndarray] = [None] * len(texts)  # type: ignore[list-item]
+    batch_indices: list[int] = []
+    batch_tokens = 0
+    for i, tc in enumerate(token_counts):
+        if batch_tokens + tc > token_budget and batch_indices:
+            vecs = embed_sentences([texts[j] for j in batch_indices], embedder)
+            for j, vec in zip(batch_indices, vecs, strict=False):
+                all_vecs[j] = vec
+            batch_indices, batch_tokens = [], 0
+        batch_indices.append(i)
+        batch_tokens += tc
+    if batch_indices:
+        vecs = embed_sentences([texts[j] for j in batch_indices], embedder)
+        for j, vec in zip(batch_indices, vecs, strict=False):
+            all_vecs[j] = vec
+    return np.array(all_vecs)

@@ -12,7 +12,7 @@ import torch
 from sqlalchemy import text
 
 from stardust.db import SessionLocal
-from stardust.extract import embed_sentences, resolve_atoms, run_nlp
+from stardust.extract import embed_with_token_budget, resolve_atoms, run_nlp
 from stardust.parse import normalize_hotpotqa
 from stardust.query import insert_index, insert_sentences
 from stardust.registry import embedder as load_embedder
@@ -132,7 +132,8 @@ def resolve_pronouns(
         atom_keys.append((rec_i, atom_i))
         all_raw_texts.extend(raw_texts)
 
-    all_vecs = embed_sentences(all_raw_texts, embedder)
+    token_budget = _load_token_budget()
+    all_vecs = embed_with_token_budget(all_raw_texts, embedder, token_budget)
     updated_list, resolvable = resolve_atoms(atoms_data, all_vecs)
 
     for (rec_i, atom_i), updated, (raw_texts, _, _) in zip(atom_keys, updated_list, atoms_data, strict=False):
@@ -165,50 +166,15 @@ def embed_and_finalize(all_records: list[_RawRecord]) -> list[_FinalRecord]:
     all_resolved = [resolved for _, _, _, resolved in flat]
     all_token_counts = [len(ids) for ids in embedder.tokenizer(all_resolved, add_special_tokens=True)["input_ids"]]
 
-    all_vecs: list[np.ndarray] = [None] * len(flat)  # type: ignore[list-item]
-    batch_indices: list[int] = []
-    batch_tokens = 0
-    batches_done = 0
-    for i, tc in enumerate(all_token_counts):
-        if batch_tokens + tc > token_budget and batch_indices:
-            vecs = embed_sentences([all_resolved[j] for j in batch_indices], embedder)
-            for j, vec in zip(batch_indices, vecs, strict=False):
-                all_vecs[j] = vec
-            batches_done += 1
-            log.info(
-                "embed: batch %d done (%d sentences, %d tokens), VRAM free %.2fGB",
-                batches_done,
-                len(batch_indices),
-                batch_tokens,
-                torch.cuda.mem_get_info()[0] / 1024**3,
-            )
-            batch_indices, batch_tokens = [], 0
-        batch_indices.append(i)
-        batch_tokens += tc
-    if batch_indices:
-        vecs = embed_sentences([all_resolved[j] for j in batch_indices], embedder)
-        for j, vec in zip(batch_indices, vecs, strict=False):
-            all_vecs[j] = vec
-        batches_done += 1
-        log.info(
-            "embed: batch %d done (%d sentences, %d tokens), VRAM free %.2fGB",
-            batches_done,
-            len(batch_indices),
-            batch_tokens,
-            torch.cuda.mem_get_info()[0] / 1024**3,
-        )
+    all_vecs_arr = embed_with_token_budget(all_resolved, embedder, token_budget)
 
     unload_embedder()
     gc.collect()
     torch.cuda.empty_cache()
-    log.info(
-        "embed: done (%d batches), embedder unloaded, VRAM free %.2fGB",
-        batches_done,
-        torch.cuda.mem_get_info()[0] / 1024**3,
-    )
+    log.info("embed: done, embedder unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     vec_map: dict[tuple[int, int, int], tuple[int, np.ndarray]] = {
-        (rec_i, atom_i, sent_i): (all_token_counts[fi], all_vecs[fi])
+        (rec_i, atom_i, sent_i): (all_token_counts[fi], all_vecs_arr[fi])
         for fi, (rec_i, atom_i, sent_i, _) in enumerate(flat)
     }
     final_records: list[_FinalRecord] = []
