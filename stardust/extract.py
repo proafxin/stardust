@@ -12,14 +12,15 @@ log = logging.getLogger(__name__)
 
 def run_nlp(sentences: list[str]) -> list[tuple[bool, list[str]]]:
     nlp_model = load_nlp()
-    return [_analyze_doc(doc) for doc in nlp_model.pipe(sentences, batch_size=NLP_BATCH_SIZE)]
+    docs = list(nlp_model.pipe(sentences, batch_size=NLP_BATCH_SIZE))
+    return [_analyze_doc(doc) for doc in docs]
 
 
 def _analyze_doc(doc: Doc) -> tuple[bool, list[str]]:
     propn_texts = [t.text for t in doc if t.pos_ == "PROPN"]
-    propn_set = {t for t in doc if t.pos_ == "PROPN"}
+    propn_ids = {t.i for t in doc if t.pos_ == "PROPN"}
     has_unresolved = any(
-        t.pos_ == "PRON" and not (propn_set & ({t.head} | set(t.children) | set(t.head.children)))
+        t.pos_ == "PRON" and not (propn_ids & ({t.head.i} | {c.i for c in t.children} | {c.i for c in t.head.children}))
         for t in doc
     )
     return has_unresolved, propn_texts
