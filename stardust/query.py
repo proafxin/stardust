@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import cast, insert, select, text, update
+from sqlalchemy import cast, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
@@ -37,8 +37,6 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                     node_type=node.node_type,
                     modality=node.modality.value,
                     value=node.value,
-                    raw_offset=node.raw_offset.model_dump(),
-                    clean_offset=node.clean_offset.model_dump(),
                 )
                 .returning(TreeNode.id)
             )
@@ -51,8 +49,6 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
                         record_id=record_id,
                         parent_id=db_parent_id,
                         value=node.value,
-                        raw_offset=node.raw_offset.model_dump(),
-                        clean_offset=node.clean_offset.model_dump(),
                     )
                 )
                 atom_ids.append(db_id)
@@ -60,26 +56,24 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
 
 
 async def insert_sentences(
-    atom_id: int, sentences: list[tuple[str, int]], session: AsyncSession
+    atom_id: int, sentences: list[tuple[str, str, int, np.ndarray]], session: AsyncSession
 ) -> None:
     if not sentences:
         return
     await session.execute(
         insert(Sentence),
         [
-            {"atom_id": atom_id, "sentence_idx": i, "raw_text": s, "token_count": tc}
-            for i, (s, tc) in enumerate(sentences)
+            {
+                "atom_id": atom_id,
+                "sentence_idx": i,
+                "raw_text": raw,
+                "resolved_text": resolved,
+                "token_count": tc,
+                "value_hash": value_hash,
+                "embedding": vec.tolist(),
+            }
+            for i, (raw, resolved, tc, value_hash, vec) in enumerate(sentences)
         ],
-    )
-
-
-async def update_sentence_embedding(
-    sentence_id: int, resolved_text: str, value_hash: str, vec: np.ndarray, token_count: int, session: AsyncSession
-) -> None:
-    await session.execute(
-        update(Sentence)
-        .where(Sentence.id == sentence_id)
-        .values(resolved_text=resolved_text, value_hash=value_hash, embedding=vec.tolist(), token_count=token_count)
     )
 
 
@@ -127,7 +121,7 @@ async def sparse_search(query: str, session: AsyncSession, record_id: str | None
                    paradedb.score(s.id) AS score
             FROM sentences s
             JOIN atoms a ON a.id = s.atom_id
-            WHERE COALESCE(s.resolved_text, s.raw_text) @@@ :query
+            WHERE s.resolved_text @@@ :query
             AND (:record_id IS NULL OR a.record_id = :record_id)
             ORDER BY score DESC
         """),

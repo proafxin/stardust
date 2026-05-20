@@ -25,8 +25,6 @@ class TreeNode(Base):
     node_type: Mapped[str] = mapped_column(String(32))
     modality: Mapped[str] = mapped_column(String(16))
     value: Mapped[str] = mapped_column(Text)
-    raw_offset: Mapped[dict] = mapped_column(JSONB)
-    clean_offset: Mapped[dict] = mapped_column(JSONB)
 
     children: Mapped[list["TreeNode"]] = relationship("TreeNode", back_populates="parent")
     parent: Mapped["TreeNode | None"] = relationship("TreeNode", back_populates="children", remote_side="TreeNode.id")
@@ -38,8 +36,6 @@ class Atom(Base):
     record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tree_nodes.id"), nullable=True)
     value: Mapped[str] = mapped_column(Text)
-    raw_offset: Mapped[dict] = mapped_column(JSONB)
-    clean_offset: Mapped[dict] = mapped_column(JSONB)
 
     __table_args__ = (Index("ix_atoms_record_id", "record_id"),)
 
@@ -50,8 +46,8 @@ class Sentence(Base):
     atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"), nullable=False, index=True)
     sentence_idx: Mapped[int] = mapped_column(Integer, nullable=False)
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_text: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    resolved_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
 

@@ -70,9 +70,9 @@ async def main() -> None:
 
     config: dict = {}
     if CONFIG_PATH.exists():
-        config = json.loads(CONFIG_PATH.read_text())
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     config["embedding_token_budget"] = safe_tokens
-    CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
     log.info("written to %s", CONFIG_PATH)
 
 

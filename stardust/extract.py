@@ -1,63 +1,45 @@
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from spacy.tokens import Doc
 
 from stardust.config import EMBEDDING_INTERNAL_BATCH_SIZE, NLP_BATCH_SIZE
 from stardust.registry import nlp as load_nlp
 
 
-def extract_sentences(
-    atom_sentences: list[list[str]],
-) -> list[list[tuple[int, bool, bool, list[str]]]]:
+def run_nlp(sentences: list[str]) -> list[tuple[bool, list[str]]]:
     nlp_model = load_nlp()
-    flat_texts = [s for sents in atom_sentences for s in sents]
-    flat_results = []
-    for doc in nlp_model.pipe(flat_texts, batch_size=NLP_BATCH_SIZE):
-        has_propn = any(t.pos_ == "PROPN" for t in doc)
-        propn_texts = [t.text for t in doc if t.pos_ == "PROPN"]
-        has_unresolved_pron = any(
-            t.pos_ == "PRON" and not any(t2.pos_ == "PROPN" and t2.sent == t.sent for t2 in doc) for t in doc
-        )
-        flat_results.append((has_propn, has_unresolved_pron, propn_texts))
-
-    results = []
-    idx = 0
-    for sents in atom_sentences:
-        atom_result = []
-        for sent_idx, _ in enumerate(sents):
-            has_propn, has_unresolved_pron, propn_texts = flat_results[idx]
-            atom_result.append((sent_idx, has_propn, has_unresolved_pron, propn_texts))
-            idx += 1
-        results.append(atom_result)
+    results: list[tuple[bool, list[str]]] = [
+        _analyze_doc(doc) for doc in nlp_model.pipe(sentences, batch_size=NLP_BATCH_SIZE)
+    ]
     return results
 
 
-def resolve_pronouns(
-    atom_id: int,
-    sentences: list[str],
-    sent_results: list[tuple[int, bool, bool, list[str]]],
-    sent_vecs: np.ndarray,
-    ancestry: str,
-) -> list[tuple[int, str, str, bool]]:
-    propn_indices = [i for i, (_, has_propn, _, _) in enumerate(sent_results) if has_propn]
-    [i for i, (_, _, has_unresolved, _) in enumerate(sent_results) if has_unresolved]
+def _analyze_doc(doc: Doc) -> tuple[bool, list[str]]:
+    propn_texts = [t.text for t in doc if t.pos_ == "PROPN"]
+    has_unresolved = any(
+        t.pos_ == "PRON" and not any(t2.pos_ == "PROPN" and (t.head in {t2, t2.head}) for t2 in doc) for t in doc
+    )
+    return has_unresolved, propn_texts
 
-    resolved: list[tuple[int, str, str, bool]] = []
-    for i, (sent_idx, _has_propn, has_unresolved, _propn_texts) in enumerate(sent_results):
-        raw = sentences[sent_idx]
-        embed_text = f"{ancestry} | {raw}" if ancestry else raw
+
+def resolve_atom(
+    raw_texts: list[str],
+    resolved_texts: list[str],
+    nlp_results: list[tuple[bool, list[str]]],
+    sent_vecs: np.ndarray,
+) -> list[str]:
+    propn_indices = [i for i, (_, propns) in enumerate(nlp_results) if propns]
+    final_resolved = list(resolved_texts)
+    for i, (has_unresolved, _) in enumerate(nlp_results):
         if not has_unresolved or not propn_indices:
-            resolved.append((sent_idx, raw, embed_text, False))
             continue
-        pron_vec = sent_vecs[i]
-        scores = np.array([float(pron_vec @ sent_vecs[j]) for j in propn_indices])
+        scores = np.array([float(sent_vecs[i] @ sent_vecs[j]) for j in propn_indices])
         best_j = propn_indices[int(np.argmax(scores))]
         if best_j == i:
-            resolved.append((sent_idx, raw, embed_text, False))
             continue
-        referent_propns = sent_results[best_j][3]
-        resolved_text = f"{embed_text} {' '.join(referent_propns)}"
-        resolved.append((sent_idx, raw, resolved_text, True))
-    return resolved
+        referent_propns = nlp_results[best_j][1]
+        final_resolved[i] = f"{resolved_texts[i]} {' '.join(referent_propns)}"
+    return final_resolved
 
 
 def embed_sentences(texts: list[str], embedder: SentenceTransformer) -> np.ndarray:

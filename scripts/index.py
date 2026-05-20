@@ -7,27 +7,19 @@ from pathlib import Path
 from typing import Any
 
 import cupy
+import numpy as np
 import torch
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from stardust.db import SessionLocal
-from stardust.extract import embed_sentences
-from stardust.models import Atom, Sentence, TreeNode
+from stardust.extract import embed_sentences, resolve_atom, run_nlp
 from stardust.parse import normalize_hotpotqa
-from stardust.query import insert_index, insert_sentences, update_sentence_embedding
+from stardust.query import insert_index, insert_sentences
 from stardust.registry import embedder as load_embedder
 from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_nlp, unload_reranker
 
 TUNING_PATH = Path("tuning.json")
-
-
-def _load_token_budget() -> int | None:
-    if not TUNING_PATH.exists():
-        return None
-    data = json.loads(TUNING_PATH.read_text(encoding="utf-8"))
-    return data.get("embedding_token_budget")
-
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -43,131 +35,182 @@ _NORMALIZER_MAP = {
     "hotpotqa": normalize_hotpotqa,
 }
 
+# atom_sentences at normalize stage: per atom, list of (raw, resolved)
+_RawRecord = tuple[str, list[Any], list[int], list[list[tuple[str, str]]]]
+# atom_sentences at final stage: per atom, list of (raw, resolved, tc, hash, vec)
+_FinalRecord = tuple[str, list[Any], list[int], list[list[tuple[str, str, int, str, np.ndarray]]]]
 
-# ── Phase 1: Normalize + persist atoms + sentences ───────────────────────────
+
+def _load_token_budget() -> int:
+    if not TUNING_PATH.exists():
+        raise RuntimeError("tuning.json not found")
+    data = json.loads(TUNING_PATH.read_text(encoding="utf-8"))
+    budget = data.get("embedding_token_budget")
+    if budget is None:
+        raise RuntimeError("embedding_token_budget required in tuning.json")
+    return budget
 
 
-async def phase_normalize() -> None:
-    log.info("phase 1: normalize + persist")
-    done = 0
-
+async def normalize_records() -> list[_RawRecord]:
+    all_records: list[_RawRecord] = []
     for dataset, data_path, id_prefix in DATASETS:
-        i = 0
         with Path(data_path).open(encoding="utf-8") as f:
             records = json.load(f)
-        for record in records:
+        count = 0
+        for i, record in enumerate(records):
             if N and i >= N:
                 break
             record_id = record.get("_id", f"{id_prefix}_{i}")
             parsed_nodes: list[Any] = [p async for p in _NORMALIZER_MAP[id_prefix](record, record_id)]
             if not parsed_nodes:
-                i += 1
                 continue
             non_atoms = [p.node for p in parsed_nodes if not p.is_atom]
             atoms = [p for p in parsed_nodes if p.is_atom]
             all_nodes = non_atoms + [p.node for p in atoms]
             atom_indices = [len(non_atoms) + j for j in range(len(atoms))]
-            if all_nodes:
-                async with SessionLocal() as session:
-                    atom_db_ids = await insert_index([(record_id, all_nodes, atom_indices)], session)
-                    for atom_node, atom_db_id in zip(atoms, atom_db_ids, strict=False):
-                        await insert_sentences(atom_db_id, atom_node.sentences, session)
-                    await session.commit()
-            i += 1
-            done += 1
-        log.info("phase 1: %s done (%d records)", dataset, i)
-
-    log.info("phase 1: done (%d total records)", done)
+            atom_sentences = [p.sentences for p in atoms]
+            all_records.append((record_id, all_nodes, atom_indices, atom_sentences))
+            count += 1
+        log.info("normalized %s: %d records", dataset, count)
+    return all_records
 
 
-async def _flush_batch(sent_ids: list[int], texts: list[str], embedder: Any) -> int:
-    if not texts:
-        return 0
-    vecs = embed_sentences(texts, embedder)
-    async with SessionLocal() as session:
-        for sent_id, embed_text, vec in zip(sent_ids, texts, vecs, strict=False):
-            new_hash = hashlib.sha256(embed_text.encode()).hexdigest()
-            tc = len(embed_text.split())
-            await update_sentence_embedding(sent_id, embed_text, new_hash, vec, tc, session)
-        await session.commit()
-    torch.cuda.empty_cache()
-    return len(texts)
+def run_spacy(all_records: list[_RawRecord]) -> dict[tuple[int, int], list[tuple[bool, list[str]]]]:
+    flat_raw: list[str] = []
+    flat_index: list[tuple[int, int]] = []  # (rec_i, atom_i)
+
+    for rec_i, (_, _, _, atom_sentences_list) in enumerate(all_records):
+        for atom_i, sentences in enumerate(atom_sentences_list):
+            for raw, _ in sentences:
+                flat_raw.append(raw)
+                flat_index.append((rec_i, atom_i))
+
+    log.info("running spaCy on %d sentences", len(flat_raw))
+    nlp_results = run_nlp(flat_raw)
+
+    atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]] = {}
+    for flat_i, (rec_i, atom_i) in enumerate(flat_index):
+        key = (rec_i, atom_i)
+        if key not in atom_nlp:
+            atom_nlp[key] = []
+        atom_nlp[key].append(nlp_results[flat_i])
+    return atom_nlp
 
 
-# ── Phase 2: spaCy + embed + pronoun resolution ──────────────────────────────
+def resolve_pronouns(
+    all_records: list[_RawRecord],
+    atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]],
+) -> list[_RawRecord]:
+    embedder = load_embedder()
+    log.info("embedder loaded for resolution, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
+    for (rec_i, atom_i), sent_nlp in atom_nlp.items():
+        if not any(has_unresolved for has_unresolved, _ in sent_nlp):
+            continue
+        sentences = all_records[rec_i][3][atom_i]
+        raw_texts = [raw for raw, _ in sentences]
+        resolved_texts = [resolved for _, resolved in sentences]
+        raw_vecs = embed_sentences(raw_texts, embedder)
+        updated = resolve_atom(raw_texts, resolved_texts, sent_nlp, raw_vecs)
+        all_records[rec_i][3][atom_i] = list(zip(raw_texts, updated, strict=False))
 
-async def phase_nlp_embed() -> None:
-    log.info("phase 2: nlp + embed + resolve")
-    log.info("phase 2: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
-
-    atom_data: list[tuple[int, str, list[tuple[int, int, str, int]]]] = []
-    async with SessionLocal() as session, session.begin():
-        stream = await session.stream(
-            select(
-                Atom.id,
-                TreeNode.value.label("ancestry"),
-                Sentence.id.label("sent_id"),
-                Sentence.sentence_idx,
-                Sentence.raw_text,
-                Sentence.token_count,
-            )
-            .join(TreeNode, TreeNode.id == Atom.parent_id)
-            .join(Sentence, Sentence.atom_id == Atom.id)
-            .order_by(Atom.id, Sentence.sentence_idx)
-        )
-        current_atom_id = None
-        current_ancestry = ""
-        current_sents: list[tuple[int, int, str, int]] = []
-        async for row in stream:
-            if row.id != current_atom_id:
-                if current_atom_id is not None:
-                    atom_data.append((current_atom_id, current_ancestry, current_sents))
-                current_atom_id = row.id
-                current_ancestry = row.ancestry or ""
-                current_sents = []
-            current_sents.append((row.sent_id, row.sentence_idx, row.raw_text, row.token_count))
-        if current_atom_id is not None:
-            atom_data.append((current_atom_id, current_ancestry, current_sents))
-
-    log.info("phase 2: running spaCy on %d atoms", len(atom_data))
-    log.info("phase 2: spaCy done, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
-
-    unload_nlp()
+    unload_embedder()
     gc.collect()
-    cupy.get_default_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
-    log.info("phase 2: spaCy unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("resolution done, embedder unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    return all_records
+
+
+def embed_and_finalize(all_records: list[_RawRecord]) -> list[_FinalRecord]:
+    token_budget = _load_token_budget()
+
+    # flatten all (rec_i, atom_i, sent_i, resolved) for indexed access
+    flat: list[tuple[int, int, int, str]] = []
+    for rec_i, (_, _, _, atom_sentences_list) in enumerate(all_records):
+        for atom_i, sentences in enumerate(atom_sentences_list):
+            for sent_i, (_, resolved) in enumerate(sentences):
+                flat.append((rec_i, atom_i, sent_i, resolved))
 
     embedder = load_embedder()
-    token_budget = _load_token_budget()
-    if token_budget is None:
-        raise RuntimeError("embedding_token_budget required in tuning.json")
+    log.info("embedding %d resolved texts, VRAM free %.2fGB", len(flat), torch.cuda.mem_get_info()[0] / 1024**3)
 
+    # tokenize all at once to get counts, then embed in token-budget batches
+    all_resolved = [resolved for _, _, _, resolved in flat]
+    all_token_counts = [len(ids) for ids in embedder.tokenizer(all_resolved, add_special_tokens=True)["input_ids"]]
+
+    all_vecs: list[np.ndarray] = [None] * len(flat)  # type: ignore[list-item]
+    batch_indices: list[int] = []
+    batch_tokens = 0
+    for i, tc in enumerate(all_token_counts):
+        if batch_tokens + tc > token_budget and batch_indices:
+            vecs = embed_sentences([all_resolved[j] for j in batch_indices], embedder)
+            for j, vec in zip(batch_indices, vecs, strict=False):
+                all_vecs[j] = vec
+            batch_indices, batch_tokens = [], 0
+        batch_indices.append(i)
+        batch_tokens += tc
+    if batch_indices:
+        vecs = embed_sentences([all_resolved[j] for j in batch_indices], embedder)
+        for j, vec in zip(batch_indices, vecs, strict=False):
+            all_vecs[j] = vec
+
+    unload_embedder()
+    gc.collect()
+    torch.cuda.empty_cache()
+    log.info("embedding done, embedder unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+
+    # reassemble into _FinalRecord structure
+    vec_map: dict[tuple[int, int, int], tuple[int, np.ndarray]] = {
+        (rec_i, atom_i, sent_i): (all_token_counts[fi], all_vecs[fi])
+        for fi, (rec_i, atom_i, sent_i, _) in enumerate(flat)
+    }
+    final_records: list[_FinalRecord] = []
+    for rec_i, (record_id, all_nodes, atom_indices, atom_sentences_list) in enumerate(all_records):
+        final_atom_sentences: list[list[tuple[str, str, int, str, np.ndarray]]] = []
+        for atom_i, sentences in enumerate(atom_sentences_list):
+            final_sents: list[tuple[str, str, int, str, np.ndarray]] = []
+            for sent_i, (raw, resolved) in enumerate(sentences):
+                tc, vec = vec_map[rec_i, atom_i, sent_i]
+                value_hash = hashlib.sha256(resolved.encode()).hexdigest()
+                final_sents.append((raw, resolved, tc, value_hash, vec))
+            final_atom_sentences.append(final_sents)
+        final_records.append((record_id, all_nodes, atom_indices, final_atom_sentences))
+    return final_records
+
+
+async def _write_batch(batch: list[_FinalRecord]) -> int:
+    total = 0
     async with SessionLocal() as session:
-        result = await session.stream(select(Sentence.id, Sentence.resolved_text, Sentence.token_count))
-        all_sentences = [
-            (row.id, embed_text, row.token_count)
-            async for row in result
-            if row.resolved_text and (embed_text := row.resolved_text.strip())
-        ]
+        for record_id, all_nodes, atom_indices, atom_sentences_list in batch:
+            atom_db_ids = await insert_index([(record_id, all_nodes, atom_indices)], session)
+            for atom_db_id, sentences in zip(atom_db_ids, atom_sentences_list, strict=False):
+                await insert_sentences(atom_db_id, sentences, session)
+                total += len(sentences)
+        await session.commit()
+    return total
 
-    embedded = 0
-    batch_texts: list[str] = []
-    batch_sent_ids: list[int] = []
-    current_tokens = 0
 
-    for sent_id, embed_text, token_count in all_sentences:
-        if current_tokens + token_count > token_budget and batch_texts:
-            embedded += await _flush_batch(batch_sent_ids, batch_texts, embedder)
-            batch_texts, batch_sent_ids, current_tokens = [], [], 0
-        batch_texts.append(embed_text)
-        batch_sent_ids.append(sent_id)
-        current_tokens += token_count
+PERSIST_BATCH_SIZE = 10000  # max sentences per DB transaction
 
-    embedded += await _flush_batch(batch_sent_ids, batch_texts, embedder)
-    log.info("phase 2: %d sentences embedded", embedded)
 
+async def persist(final_records: list[_FinalRecord]) -> None:
+    batch: list[_FinalRecord] = []
+    batch_sentences = 0
+    total_sentences = 0
+
+    for record in final_records:
+        record_sentences = sum(len(sents) for sents in record[3])
+        if batch_sentences + record_sentences > PERSIST_BATCH_SIZE and batch:
+            total_sentences += await _write_batch(batch)
+            batch, batch_sentences = [], 0
+        batch.append(record)
+        batch_sentences += record_sentences
+
+    total_sentences += await _write_batch(batch)
+    log.info("%d sentences written to DB", total_sentences)
+
+
+async def build_hnsw_index() -> None:
     async with SessionLocal() as session:
         await session.execute(
             text(
@@ -177,21 +220,10 @@ async def phase_nlp_embed() -> None:
             )
         )
         await session.commit()
-    log.info("phase 2: hnsw index created")
-    log.info("phase 2: done")
+    log.info("HNSW index created")
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-
-
-async def main(skip_normalize: bool = False) -> None:
-    if not skip_normalize:
-        unload_embedder()
-        unload_reranker()
-        unload_nlp()
-        gc.collect()
-        torch.cuda.empty_cache()
-        await phase_normalize()
+async def main() -> None:
     unload_embedder()
     unload_reranker()
     unload_nlp()
@@ -199,8 +231,24 @@ async def main(skip_normalize: bool = False) -> None:
     cupy.get_default_memory_pool().free_all_blocks()
     cupy.get_default_pinned_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
+
+    all_records = await normalize_records()
+
     load_nlp()
-    await phase_nlp_embed()
+    log.info("spaCy loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    atom_nlp = run_spacy(all_records)
+    unload_nlp()
+    gc.collect()
+    cupy.get_default_memory_pool().free_all_blocks()
+    torch.cuda.empty_cache()
+    log.info("spaCy unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+
+    all_records = resolve_pronouns(all_records, atom_nlp)
+    final_records = embed_and_finalize(all_records)
+
+    await persist(final_records)
+    await build_hnsw_index()
+
     unload_embedder()
     unload_reranker()
     unload_nlp()
@@ -209,9 +257,4 @@ async def main(skip_normalize: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--skip-normalize", action="store_true")
-    args = parser.parse_args()
-    asyncio.run(main(skip_normalize=args.skip_normalize))
+    asyncio.run(main())
