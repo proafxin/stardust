@@ -2,16 +2,16 @@ import gc
 from functools import cache
 
 import torch
-from fastcoref import LingMessCoref
+from fastcoref import FCoref
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from stardust.config import COREF_MODEL, EMBEDDING_MODEL, RERANKER_MODEL
 
 
 @cache
-def coref() -> LingMessCoref:
-    model = LingMessCoref(model_name_or_path=COREF_MODEL, device="cuda", enable_progress_bar=False)
-    model.model = torch.compile(model.model)
+def coref() -> FCoref:
+    model = FCoref(model_name_or_path=COREF_MODEL, device="cuda", compile_model=True)
+    model.predict(texts=["warm up"])
     return model
 
 

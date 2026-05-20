@@ -21,6 +21,7 @@ TUNING_PATH = Path("tuning.json")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger("fastcoref").setLevel(logging.WARNING)
+logging.getLogger("transformers").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def _build_atom_sentences(resolved_sentences: list[tuple[str, str]]) -> list[tup
 
 
 PERSIST_BATCH_SIZE = 10000
-COREF_BATCH_SIZE = 768  # atoms per coref batch
+COREF_BATCH_SIZE = 1536  # atoms per coref batch
 
 
 async def _process_dataset(

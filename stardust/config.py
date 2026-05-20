@@ -19,7 +19,7 @@ class Settings(BaseSettings):
         )
 
 
-COREF_MODEL = "biu-nlp/lingmess-coref"
+COREF_MODEL = "biu-nlp/f-coref"
 EMBEDDING_MODEL = "BAAI/bge-m3"
 EMBEDDING_DIM = 1024
 RERANKER_MODEL = "mixedbread-ai/mxbai-rerank-base-v2"
