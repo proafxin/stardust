@@ -134,7 +134,10 @@ def resolve_pronouns(
         all_raw_texts.extend(raw_texts[i] for i in embed_indices)
 
     if all_raw_texts:
-        all_vecs = embed_with_token_budget(all_raw_texts, embedder, token_budget)
+        unique_texts = list(dict.fromkeys(all_raw_texts))
+        text_to_idx = {t: i for i, t in enumerate(unique_texts)}
+        unique_vecs = embed_with_token_budget(unique_texts, embedder, token_budget)
+        all_vecs = unique_vecs[np.array([text_to_idx[t] for t in all_raw_texts])]
         updated_list, resolvable = resolve_atoms(atoms_data, all_vecs)
         for (rec_i, atom_i), updated, (raw_texts, _, _, _) in zip(atom_keys, updated_list, atoms_data, strict=False):
             all_records[rec_i][3][atom_i] = list(zip(raw_texts, updated, strict=False))
@@ -216,6 +219,13 @@ async def persist(final_records: list[_FinalRecord]) -> None:
     log.info("%d sentences written to DB", total_sentences)
 
 
+async def drop_hnsw_index() -> None:
+    async with SessionLocal() as session:
+        await session.execute(text("DROP INDEX IF EXISTS ix_sentences_embedding"))
+        await session.commit()
+    log.info("HNSW index dropped")
+
+
 async def build_hnsw_index() -> None:
     async with SessionLocal() as session:
         await session.execute(
@@ -260,6 +270,7 @@ async def main() -> None:
     torch.cuda.empty_cache()
     log.info("embedder unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
+    await drop_hnsw_index()
     await persist(final_records)
     await build_hnsw_index()
 

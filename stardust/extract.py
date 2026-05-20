@@ -78,7 +78,7 @@ def resolve_atoms(
                     candidates = [pos for pos, orig_j in enumerate(embed_indices) if pos != i_pos and nlp_results[orig_j][1]]
                 if not candidates:
                     continue
-                scores = np.array([float(sent_vecs[i_pos] @ sent_vecs[pos]) for pos in candidates])
+                scores = sent_vecs[i_pos] @ sent_vecs[np.array(candidates)].T
                 best_pos = candidates[int(np.argmax(scores))]
                 best_orig = embed_indices[best_pos]
                 compatible = [
