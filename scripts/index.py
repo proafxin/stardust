@@ -151,7 +151,7 @@ async def phase_nlp_embed() -> None:
                 for (sent_id, _, _), (_, _, resolved_text, changed) in zip(sents, resolved, strict=False):
                     if not changed:
                         continue
-                    vec = embed_sentences([resolved_text], embedder)[0].cpu().numpy()
+                    vec = embed_sentences([resolved_text], embedder)[0]
                     new_hash = hashlib.sha256(resolved_text.encode()).hexdigest()
                     await update_sentence_embedding(sent_id, resolved_text, new_hash, vec, write_session)
                     updated += 1
