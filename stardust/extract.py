@@ -11,34 +11,28 @@ _PRON = re.compile(r"\b(he|she|it|they|him|her|them|his|hers|its|their|theirs|hi
 
 
 def resolve_atoms_coref(
-    atoms: list[list[tuple[str, str]]],
+    atoms: list[tuple[list[str], str]],
     coref_model: LingMessCoref,
     max_tokens_in_batch: int = 10000,
 ) -> list[list[tuple[str, str]]]:
-    atom_texts = [" ".join(raw for raw, _ in sents) for sents in atoms]
+    atom_texts = [" ".join(sents) for sents, _ in atoms]
     preds = coref_model.predict(texts=atom_texts, max_tokens_in_batch=max_tokens_in_batch)
 
     results: list[list[tuple[str, str]]] = []
-    for atom_text, sentences, pred in zip(atom_texts, atoms, preds, strict=False):
+    for atom_text, (raw_sents, ancestry), pred in zip(atom_texts, atoms, preds, strict=False):
         clusters = pred.get_clusters(as_strings=False)
-        if not clusters:
-            results.append(sentences)
-            continue
 
         pron_to_canonical: dict[tuple[int, int], str] = {}
-        for cluster in clusters:
-            canonical = atom_text[cluster[0][0]:cluster[0][1]]
-            for start, end in cluster[1:]:
-                if _PRON.fullmatch(atom_text[start:end].strip()):
-                    pron_to_canonical[(start, end)] = canonical
+        if clusters:
+            for cluster in clusters:
+                canonical = atom_text[cluster[0][0]:cluster[0][1]]
+                for start, end in cluster[1:]:
+                    if _PRON.fullmatch(atom_text[start:end].strip()):
+                        pron_to_canonical[(start, end)] = canonical
 
-        if not pron_to_canonical:
-            results.append(sentences)
-            continue
-
-        updated: list[tuple[str, str]] = []
+        resolved_sents: list[tuple[str, str]] = []
         offset = 0
-        for raw, resolved in sentences:
+        for raw in raw_sents:
             sent_start = offset
             sent_end = offset + len(raw)
             offset = sent_end + 1
@@ -49,24 +43,12 @@ def resolve_atoms_coref(
                 if sent_start <= start < sent_end
             ]
 
-            if not replacements:
-                updated.append((raw, resolved))
-                continue
-
-            raw_in_resolved = resolved.rfind(raw)
-            if raw_in_resolved == -1:
-                updated.append((raw, resolved))
-                continue
-
-            new_resolved = resolved
+            resolved = raw
             for r_start, r_end, canonical in sorted(replacements, reverse=True):
-                abs_start = raw_in_resolved + r_start
-                abs_end = raw_in_resolved + r_end
-                new_resolved = new_resolved[:abs_start] + canonical + new_resolved[abs_end:]
+                resolved = resolved[:r_start] + canonical + resolved[r_end:]
 
-            updated.append((raw, new_resolved))
-
-        results.append(updated)
+            resolved_sents.append((raw, f"{ancestry} | {resolved}"))
+        results.append(resolved_sents)
     return results
 
 

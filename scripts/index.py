@@ -20,6 +20,8 @@ from stardust.registry import unload_coref, unload_embedder
 TUNING_PATH = Path("tuning.json")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("fastcoref").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path("data")
@@ -74,7 +76,7 @@ def _build_atom_sentences(resolved_sentences: list[tuple[str, str]]) -> list[tup
 
 
 PERSIST_BATCH_SIZE = 10000
-COREF_BATCH_SIZE = 500  # atoms per coref batch
+COREF_BATCH_SIZE = 768  # atoms per coref batch
 
 
 async def _process_dataset(
@@ -83,7 +85,7 @@ async def _process_dataset(
     with Path(data_path).open(encoding="utf-8") as f:
         raw_records = json.load(f)
 
-    pending: list[tuple[str, list[Any], list[int], list[list[tuple[str, str]]]]] = []
+    pending: list[tuple[str, list[Any], list[int], list[tuple[list[str], str]]]] = []
     for i, record in enumerate(raw_records):
         if N and i >= N:
             break
@@ -95,9 +97,9 @@ async def _process_dataset(
         atoms = [p for p in parsed_nodes if p.is_atom]
         all_nodes = non_atoms + [p.node for p in atoms]
         atom_indices = [len(non_atoms) + j for j in range(len(atoms))]
-        pending.append((record_id, all_nodes, atom_indices, [p.sentences for p in atoms]))
+        pending.append((record_id, all_nodes, atom_indices, [(p.sentences, p.ancestry) for p in atoms]))
 
-    flat_atoms = [sents for _, _, _, atom_sentences_list in pending for sents in atom_sentences_list]
+    flat_atoms = [atom for _, _, _, atom_list in pending for atom in atom_list]
     resolved_flat: list[list[tuple[str, str]]] = []
     for start in range(0, len(flat_atoms), COREF_BATCH_SIZE):
         resolved_flat.extend(resolve_atoms_coref(flat_atoms[start: start + COREF_BATCH_SIZE], coref_model))

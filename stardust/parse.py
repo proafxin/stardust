@@ -14,7 +14,8 @@ HOTPOTQA_LEVELS = ["corpus", "record", "document", "text"]
 class ParsedNode:
     node: Node
     is_atom: bool
-    sentences: list[tuple[str, str]]
+    sentences: list[str]
+    ancestry: str = ""
 
 
 def _clean(raw: str) -> str:
@@ -64,10 +65,11 @@ async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGen
         if not text:
             continue
         text_clean = _clean(text)
-        clean_sentences = [(s.strip(), f"{doc_value} | {s.strip()}") for s in sentences if s.strip()]
+        clean_sentences = [s.strip() for s in sentences if s.strip()]
         yield ParsedNode(
             node=_make_node(atom_level, text_clean, doc_index, terminal=True),
             is_atom=True,
             sentences=clean_sentences,
+            ancestry=doc_value,
         )
         index += 1
