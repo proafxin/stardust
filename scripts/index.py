@@ -17,6 +17,7 @@ from stardust.extract import embed_sentences, resolve_atom, run_nlp
 from stardust.parse import normalize_hotpotqa
 from stardust.query import insert_index, insert_sentences
 from stardust.registry import embedder as load_embedder
+from stardust.registry import nlp as load_nlp
 from stardust.registry import unload_embedder, unload_nlp
 
 TUNING_PATH = Path("tuning.json")
@@ -39,6 +40,12 @@ _NORMALIZER_MAP = {
 _RawRecord = tuple[str, list[Any], list[int], list[list[tuple[str, str]]]]
 # atom_sentences at final stage: per atom, list of (raw, resolved, tc, hash, vec)
 _FinalRecord = tuple[str, list[Any], list[int], list[list[tuple[str, str, int, str, np.ndarray]]]]
+
+
+def _vram_free_gb() -> float:
+    free_torch, _ = torch.cuda.mem_get_info()
+    cupy_used = cupy.get_default_memory_pool().used_bytes()
+    return (free_torch - cupy_used) / 1024**3
 
 
 def _load_token_budget() -> int:
@@ -86,12 +93,10 @@ def run_spacy(all_records: list[_RawRecord]) -> dict[tuple[int, int], list[tuple
                 flat_index.append((rec_i, atom_i))
 
     total = len(flat_raw)
-    log.info("spaCy: processing %d sentences in chunks of %d", total, NLP_BATCH_SIZE)
-    nlp_results: list[tuple[bool, list[str]]] = []
-    for start in range(0, total, NLP_BATCH_SIZE):
-        chunk = flat_raw[start : start + NLP_BATCH_SIZE]
-        nlp_results.extend(run_nlp(chunk))
-        log.info("spaCy: %d/%d sentences done", min(start + NLP_BATCH_SIZE, total), total)
+    log.info("spaCy: processing %d sentences", total)
+    nlp_results: list[tuple[bool, list[str]]] = [
+        _analyze_doc(doc) for doc in nlp_model.pipe(flat_raw, batch_size=NLP_BATCH_SIZE)
+    ]
     log.info("spaCy: done")
 
     atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]] = {}
@@ -108,11 +113,13 @@ def resolve_pronouns(
     atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]],
 ) -> list[_RawRecord]:
     needs_resolution = [(k, v) for k, v in atom_nlp.items() if any(hu for hu, _ in v)]
+    total_sents = sum(len(v) for v in atom_nlp.values())
     total_unresolved_sents = sum(sum(1 for hu, _ in v if hu) for _, v in needs_resolution)
     log.info(
-        "resolve: %d atoms need resolution, %d unresolved sentences total",
-        len(needs_resolution),
+        "resolve: %d/%d sentences need resolution across %d atoms",
         total_unresolved_sents,
+        total_sents,
+        len(needs_resolution),
     )
     embedder = load_embedder()
     log.info("resolve: embedder loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
@@ -272,13 +279,13 @@ async def main() -> None:
     all_records = await normalize_records()
 
     load_nlp()
-    log.info("spaCy: loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("spaCy: loaded, VRAM free %.2fGB", _vram_free_gb())
     atom_nlp = run_spacy(all_records)
     unload_nlp()
     gc.collect()
     cupy.get_default_memory_pool().free_all_blocks()
     torch.cuda.empty_cache()
-    log.info("spaCy: unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info("spaCy: unloaded, VRAM free %.2fGB", _vram_free_gb())
 
     all_records = resolve_pronouns(all_records, atom_nlp)
     final_records = embed_and_finalize(all_records)
