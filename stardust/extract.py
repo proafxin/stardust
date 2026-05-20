@@ -66,7 +66,7 @@ def resolve_pronouns(
 def embed_sentences(texts: list[str], embedder: SentenceTransformer) -> np.ndarray:
     return embedder.encode(
         texts,
-        batch_size=len(texts),
+        batch_size=512,
         normalize_embeddings=True,
         show_progress_bar=False,
         convert_to_numpy=True,
