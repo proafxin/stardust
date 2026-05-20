@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
-from stardust.tree.atom import Modality, Node
+from stardust.atom import Modality, Node
 
 HOTPOTQA_LEVELS = ["corpus", "record", "document", "text"]
 

@@ -3,7 +3,7 @@ import json
 import logging
 from pathlib import Path
 
-from stardust.benchmark.eval import aggregate_metrics, compute_metrics
+from stardust.eval import aggregate_metrics, compute_metrics
 from stardust.db import SessionLocal
 from stardust.query import retrieve
 

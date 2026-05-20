@@ -10,7 +10,7 @@ from stardust.config import RRF_K
 from stardust.models import Atom, Sentence, SentenceEmbedding, TreeNode
 from stardust.registry import embedder as load_embedder
 from stardust.registry import reranker as load_reranker
-from stardust.tree.atom import Node
+from stardust.atom import Node
 
 
 @dataclass

@@ -1,7 +1,7 @@
 import json
 import logging
 
-from stardust.benchmark.hotpotqa import run as run_hotpotqa
+from stardust.hotpotqa import run as run_hotpotqa
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
