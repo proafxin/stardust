@@ -137,7 +137,7 @@ def resolve_pronouns(
     all_vecs = embed_with_token_budget(all_raw_texts, embedder, token_budget)
     updated_list, resolvable = resolve_atoms(atoms_data, all_vecs)
 
-    for (rec_i, atom_i), updated, (raw_texts, _, _) in zip(atom_keys, updated_list, atoms_data, strict=False):
+    for (rec_i, atom_i), updated, (raw_texts, _, _, _) in zip(atom_keys, updated_list, atoms_data, strict=False):
         all_records[rec_i][3][atom_i] = list(zip(raw_texts, updated, strict=False))
 
     unload_embedder()
