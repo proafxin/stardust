@@ -12,8 +12,8 @@ log = logging.getLogger(__name__)
 
 def run_nlp(sentences: list[str]) -> list[tuple[bool, list[str]]]:
     nlp_model = load_nlp()
-    docs = list(nlp_model.pipe(sentences, batch_size=NLP_BATCH_SIZE))
-    return [_analyze_doc(doc) for doc in docs]
+    results = [_analyze_doc(doc) for doc in nlp_model.pipe(sentences, batch_size=NLP_BATCH_SIZE)]
+    return results
 
 
 def _analyze_doc(doc: Doc) -> tuple[bool, list[str]]:
