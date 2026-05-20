@@ -11,9 +11,8 @@ import numpy as np
 import torch
 from sqlalchemy import text
 
-from stardust.config import NLP_BATCH_SIZE
 from stardust.db import SessionLocal
-from stardust.extract import embed_sentences, resolve_atom, run_nlp
+from stardust.extract import embed_sentences, resolve_atom
 from stardust.parse import normalize_hotpotqa
 from stardust.query import insert_index, insert_sentences
 from stardust.registry import embedder as load_embedder
@@ -94,9 +93,7 @@ def run_spacy(all_records: list[_RawRecord]) -> dict[tuple[int, int], list[tuple
 
     total = len(flat_raw)
     log.info("spaCy: processing %d sentences", total)
-    nlp_results: list[tuple[bool, list[str]]] = [
-        _analyze_doc(doc) for doc in nlp_model.pipe(flat_raw, batch_size=NLP_BATCH_SIZE)
-    ]
+    nlp_results: list[tuple[bool, list[str]]] = run_nlp(flat_raw)
     log.info("spaCy: done")
 
     atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]] = {}
