@@ -59,22 +59,27 @@ async def insert_index(docs: list[tuple[str, list[Node], list[int]]], session: A
     return atom_ids
 
 
-async def insert_sentences(atom_id: int, sentences: list[str], session: AsyncSession) -> None:
+async def insert_sentences(
+    atom_id: int, sentences: list[tuple[str, int]], session: AsyncSession
+) -> None:
     if not sentences:
         return
     await session.execute(
         insert(Sentence),
-        [{"atom_id": atom_id, "sentence_idx": i, "raw_text": s} for i, s in enumerate(sentences)],
+        [
+            {"atom_id": atom_id, "sentence_idx": i, "raw_text": s, "token_count": tc}
+            for i, (s, tc) in enumerate(sentences)
+        ],
     )
 
 
 async def update_sentence_embedding(
-    sentence_id: int, resolved_text: str, value_hash: str, vec: np.ndarray, session: AsyncSession
+    sentence_id: int, resolved_text: str, value_hash: str, vec: np.ndarray, token_count: int, session: AsyncSession
 ) -> None:
     await session.execute(
         update(Sentence)
         .where(Sentence.id == sentence_id)
-        .values(resolved_text=resolved_text, value_hash=value_hash, embedding=vec.tolist())
+        .values(resolved_text=resolved_text, value_hash=value_hash, embedding=vec.tolist(), token_count=token_count)
     )
 
 

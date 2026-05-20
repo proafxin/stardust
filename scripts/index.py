@@ -7,13 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import cupy
-import numpy as np
 import torch
 from sqlalchemy import select, text
 
-from stardust.config import EMBEDDING_BATCH_SIZE, EMBEDDING_INTERNAL_BATCH_SIZE
 from stardust.db import SessionLocal
-from stardust.extract import embed_sentences, extract_sentences, resolve_pronouns
+from stardust.extract import embed_sentences
 from stardust.models import Atom, Sentence, TreeNode
 from stardust.parse import normalize_hotpotqa
 from stardust.query import insert_index, insert_sentences, update_sentence_embedding
@@ -27,8 +25,9 @@ TUNING_PATH = Path("tuning.json")
 def _load_token_budget() -> int | None:
     if not TUNING_PATH.exists():
         return None
-    data = json.loads(TUNING_PATH.read_text())
+    data = json.loads(TUNING_PATH.read_text(encoding="utf-8"))
     return data.get("embedding_token_budget")
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -81,6 +80,20 @@ async def phase_normalize() -> None:
     log.info("phase 1: done (%d total records)", done)
 
 
+async def _flush_batch(sent_ids: list[int], texts: list[str], embedder: Any) -> int:
+    if not texts:
+        return 0
+    vecs = embed_sentences(texts, embedder)
+    async with SessionLocal() as session:
+        for sent_id, embed_text, vec in zip(sent_ids, texts, vecs, strict=False):
+            new_hash = hashlib.sha256(embed_text.encode()).hexdigest()
+            tc = len(embed_text.split())
+            await update_sentence_embedding(sent_id, embed_text, new_hash, vec, tc, session)
+        await session.commit()
+    torch.cuda.empty_cache()
+    return len(texts)
+
+
 # ── Phase 2: spaCy + embed + pronoun resolution ──────────────────────────────
 
 
@@ -88,7 +101,7 @@ async def phase_nlp_embed() -> None:
     log.info("phase 2: nlp + embed + resolve")
     log.info("phase 2: VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-    atom_data: list[tuple[int, str, list[tuple[int, int, str]]]] = []
+    atom_data: list[tuple[int, str, list[tuple[int, int, str, int]]]] = []
     async with SessionLocal() as session, session.begin():
         stream = await session.stream(
             select(
@@ -97,6 +110,7 @@ async def phase_nlp_embed() -> None:
                 Sentence.id.label("sent_id"),
                 Sentence.sentence_idx,
                 Sentence.raw_text,
+                Sentence.token_count,
             )
             .join(TreeNode, TreeNode.id == Atom.parent_id)
             .join(Sentence, Sentence.atom_id == Atom.id)
@@ -104,7 +118,7 @@ async def phase_nlp_embed() -> None:
         )
         current_atom_id = None
         current_ancestry = ""
-        current_sents: list[tuple[int, int, str]] = []
+        current_sents: list[tuple[int, int, str, int]] = []
         async for row in stream:
             if row.id != current_atom_id:
                 if current_atom_id is not None:
@@ -112,13 +126,11 @@ async def phase_nlp_embed() -> None:
                 current_atom_id = row.id
                 current_ancestry = row.ancestry or ""
                 current_sents = []
-            current_sents.append((row.sent_id, row.sentence_idx, row.raw_text))
+            current_sents.append((row.sent_id, row.sentence_idx, row.raw_text, row.token_count))
         if current_atom_id is not None:
             atom_data.append((current_atom_id, current_ancestry, current_sents))
 
     log.info("phase 2: running spaCy on %d atoms", len(atom_data))
-    atom_sentences = [[s[2] for s in sents] for _, _, sents in atom_data]
-    all_sent_results = extract_sentences(atom_sentences)
     log.info("phase 2: spaCy done, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     unload_nlp()
@@ -128,76 +140,33 @@ async def phase_nlp_embed() -> None:
     log.info("phase 2: spaCy unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
     embedder = load_embedder()
-    done = embedded = updated = 0
+    token_budget = _load_token_budget()
+    if token_budget is None:
+        raise RuntimeError("embedding_token_budget required in tuning.json")
 
-    for batch_start in range(0, len(atom_data), EMBEDDING_BATCH_SIZE):
-        batch_atoms = atom_data[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
-        batch_sent_results = all_sent_results[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
+    async with SessionLocal() as session:
+        result = await session.stream(select(Sentence.id, Sentence.resolved_text, Sentence.token_count))
+        all_sentences = [
+            (row.id, embed_text, row.token_count)
+            async for row in result
+            if row.resolved_text and (embed_text := row.resolved_text.strip())
+        ]
 
-        all_embed_texts: list[str] = []
-        for (_, ancestry, sents), _ in zip(batch_atoms, batch_sent_results, strict=False):
-            for _, _, raw_text in sents:
-                all_embed_texts.append(f"{ancestry} | {raw_text}" if ancestry else raw_text)
+    embedded = 0
+    batch_texts: list[str] = []
+    batch_sent_ids: list[int] = []
+    current_tokens = 0
 
-        token_budget = _load_token_budget()
-        if token_budget is not None:
-            tokenizer = embedder.tokenizer
-            batches: list[list[str]] = []
-            current: list[str] = []
-            current_tokens = 0
-            for t in all_embed_texts:
-                tc = len(tokenizer.encode(t, add_special_tokens=True))
-                if current and current_tokens + tc > token_budget:
-                    batches.append(current)
-                    current, current_tokens = [], 0
-                current.append(t)
-                current_tokens += tc
-            if current:
-                batches.append(current)
-        else:
-            batches = [all_embed_texts[i : i + EMBEDDING_INTERNAL_BATCH_SIZE] for i in range(0, len(all_embed_texts), EMBEDDING_INTERNAL_BATCH_SIZE)]
-        vecs_list = [embed_sentences(b, embedder) for b in batches]
-        vecs = np.concatenate(vecs_list, axis=0)
+    for sent_id, embed_text, token_count in all_sentences:
+        if current_tokens + token_count > token_budget and batch_texts:
+            embedded += await _flush_batch(batch_sent_ids, batch_texts, embedder)
+            batch_texts, batch_sent_ids, current_tokens = [], [], 0
+        batch_texts.append(embed_text)
+        batch_sent_ids.append(sent_id)
+        current_tokens += token_count
 
-        vec_idx = 0
-        sent_vecs_map: dict[int, np.ndarray] = {}
-        async with SessionLocal() as write_session:
-            for (_, ancestry, sents), sent_results in zip(batch_atoms, batch_sent_results, strict=False):
-                for (sent_id, _sent_idx, raw_text), _ in zip(sents, sent_results, strict=False):
-                    embed_text = all_embed_texts[vec_idx]
-                    new_hash = hashlib.sha256(embed_text.encode()).hexdigest()
-                    await update_sentence_embedding(sent_id, embed_text, new_hash, vecs[vec_idx], write_session)
-                    sent_vecs_map[sent_id] = vecs[vec_idx]
-                    vec_idx += 1
-            await write_session.commit()
-        embedded += vec_idx
-
-        # pronoun resolution within batch
-        async with SessionLocal() as write_session:
-            for (atom_id, ancestry, sents), sent_results in zip(batch_atoms, batch_sent_results, strict=False):
-                has_unresolved = any(r[2] for r in sent_results)
-                if not has_unresolved:
-                    continue
-                sent_vecs = np.array([sent_vecs_map[s[0]] for s in sents], dtype=np.float32)
-                sentences_text = [s[2] for s in sents]
-                resolved = resolve_pronouns(atom_id, sentences_text, sent_results, sent_vecs, ancestry)
-                for (sent_id, _, _), (_, _, resolved_text, changed) in zip(sents, resolved, strict=False):
-                    if not changed:
-                        continue
-                    vec = embed_sentences([resolved_text], embedder)[0]
-                    new_hash = hashlib.sha256(resolved_text.encode()).hexdigest()
-                    await update_sentence_embedding(sent_id, resolved_text, new_hash, vec, write_session)
-                    updated += 1
-            await write_session.commit()
-
-        torch.cuda.empty_cache()
-        done += sum(len(sents) for _, _, sents in batch_atoms)
-        log.info(
-            "phase 2: %d sentences embedded, %d resolved, VRAM free %.2fGB",
-            done,
-            updated,
-            torch.cuda.mem_get_info()[0] / 1024**3,
-        )
+    embedded += await _flush_batch(batch_sent_ids, batch_texts, embedder)
+    log.info("phase 2: %d sentences embedded", embedded)
 
     async with SessionLocal() as session:
         await session.execute(

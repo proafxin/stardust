@@ -50,6 +50,7 @@ class Sentence(Base):
     atom_id: Mapped[int] = mapped_column(Integer, ForeignKey("atoms.id"), nullable=False, index=True)
     sentence_idx: Mapped[int] = mapped_column(Integer, nullable=False)
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     resolved_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
