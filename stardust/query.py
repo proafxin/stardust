@@ -77,13 +77,14 @@ async def insert_sentences(
     )
 
 
-async def dense_search(query: str, session: AsyncSession, record_id: str | None = None) -> list[RankedSentence]:
+async def dense_search(query: str, session: AsyncSession, top_k: int = 100, record_id: str | None = None) -> list[RankedSentence]:
     vec = cast(load_embedder().encode(query, normalize_embeddings=True).tolist(), Vector)
     distance = Sentence.embedding.cosine_distance(vec).label("distance")
     stmt = (
         select(Sentence.id, Sentence.atom_id, Sentence.sentence_idx, Sentence.raw_text, (1 - distance).label("score"))
         .where(Sentence.embedding.is_not(None))
         .order_by(distance)
+        .limit(top_k)
     )
     if record_id:
         stmt = stmt.join(Atom, Atom.id == Sentence.atom_id).where(Atom.record_id == record_id)
@@ -156,7 +157,7 @@ async def retrieve(
     use_reranker: bool = False,
 ) -> list[RankedSentence]:
     dense, sparse = (
-        await dense_search(query, session, record_id),
+        await dense_search(query, session, top_k, record_id),
         await sparse_search(query, session, record_id),
     )
     fused = _rrf(dense, sparse)
