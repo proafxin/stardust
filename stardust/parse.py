@@ -136,7 +136,7 @@ def _parse_md_tables(markdown: str, last_heading: str = "") -> list[TableData]:
         rows: list[str] = []
         for row_line in data_rows:
             cells = [_cell_text(c) for c in row_line.strip("|\n ").split("|")]
-            cells = cells[:len(col_names)]
+            cells = cells[: len(col_names)]
             while len(cells) < len(col_names):
                 cells.append("")
             if not any(cells):
@@ -156,7 +156,9 @@ async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGen
     corpus_clean, _ = _clean(corpus_text)
     corpus_index = state.index
     yield ParsedNode(
-        node=_make_node(corpus_level, corpus_clean, state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None),
+        node=_make_node(
+            corpus_level, corpus_clean, state.raw_pos, len(corpus_text), state.clean_pos, len(corpus_clean), None
+        ),
         is_atom=False,
         sentences=[],
     )
@@ -168,7 +170,9 @@ async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGen
     record_value = f"{corpus_clean} | {record_clean}"
     record_index = state.index
     yield ParsedNode(
-        node=_make_node(record_level, record_value, state.raw_pos, len(record_id), state.clean_pos, len(record_clean), corpus_index),
+        node=_make_node(
+            record_level, record_value, state.raw_pos, len(record_id), state.clean_pos, len(record_clean), corpus_index
+        ),
         is_atom=False,
         sentences=[],
     )
@@ -181,7 +185,9 @@ async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGen
         doc_value = f"{record_value} | {title_clean}"
         doc_index = state.index
         yield ParsedNode(
-            node=_make_node(doc_level, doc_value, state.raw_pos, len(title), state.clean_pos, len(title_clean), record_index),
+            node=_make_node(
+                doc_level, doc_value, state.raw_pos, len(title), state.clean_pos, len(title_clean), record_index
+            ),
             is_atom=False,
             sentences=[],
         )
@@ -195,7 +201,16 @@ async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGen
         text_clean, _ = _clean(text)
         clean_sentences = [s.strip() for s in sentences if s.strip()]
         yield ParsedNode(
-            node=_make_node(atom_level, text_clean, state.raw_pos, len(text), state.clean_pos, len(text_clean), doc_index, terminal=True),
+            node=_make_node(
+                atom_level,
+                text_clean,
+                state.raw_pos,
+                len(text),
+                state.clean_pos,
+                len(text_clean),
+                doc_index,
+                terminal=True,
+            ),
             is_atom=True,
             sentences=clean_sentences,
         )

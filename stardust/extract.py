@@ -15,10 +15,7 @@ def extract_sentences(
         has_propn = any(t.pos_ == "PROPN" for t in doc)
         propn_texts = [t.text for t in doc if t.pos_ == "PROPN"]
         has_unresolved_pron = any(
-            t.pos_ == "PRON" and not any(
-                t2.pos_ == "PROPN" and t2.sent == t.sent for t2 in doc
-            )
-            for t in doc
+            t.pos_ == "PRON" and not any(t2.pos_ == "PROPN" and t2.sent == t.sent for t2 in doc) for t in doc
         )
         flat_results.append((has_propn, has_unresolved_pron, propn_texts))
 
@@ -42,10 +39,10 @@ def resolve_pronouns(
     ancestry: str,
 ) -> list[tuple[int, str, str, bool]]:
     propn_indices = [i for i, (_, has_propn, _, _) in enumerate(sent_results) if has_propn]
-    unresolved_indices = [i for i, (_, _, has_unresolved, _) in enumerate(sent_results) if has_unresolved]
+    [i for i, (_, _, has_unresolved, _) in enumerate(sent_results) if has_unresolved]
 
     resolved: list[tuple[int, str, str, bool]] = []
-    for i, (sent_idx, has_propn, has_unresolved, propn_texts) in enumerate(sent_results):
+    for i, (sent_idx, _has_propn, has_unresolved, _propn_texts) in enumerate(sent_results):
         raw = sentences[sent_idx]
         embed_text = f"{ancestry} | {raw}" if ancestry else raw
         if not has_unresolved or not propn_indices:
@@ -66,7 +63,7 @@ def resolve_pronouns(
 def embed_sentences(texts: list[str], embedder: SentenceTransformer) -> np.ndarray:
     return embedder.encode(
         texts,
-        batch_size=512,
+        batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
         normalize_embeddings=True,
         show_progress_bar=False,
         convert_to_numpy=True,

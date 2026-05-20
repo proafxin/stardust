@@ -108,7 +108,10 @@ async def dense_search(query: str, session: AsyncSession, record_id: str | None 
     if record_id:
         stmt = stmt.join(Atom, Atom.id == Sentence.atom_id).where(Atom.record_id == record_id)
     rows = (await session.execute(stmt)).fetchall()
-    return [RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=r.score) for r in rows]
+    return [
+        RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=r.score)
+        for r in rows
+    ]
 
 
 async def sparse_search(query: str, session: AsyncSession, record_id: str | None = None) -> list[RankedSentence]:
@@ -126,7 +129,10 @@ async def sparse_search(query: str, session: AsyncSession, record_id: str | None
             {"query": query, "record_id": record_id},
         )
     ).fetchall()
-    return [RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=r.score) for r in rows]
+    return [
+        RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=r.score)
+        for r in rows
+    ]
 
 
 def _rrf(dense: list[RankedSentence], sparse: list[RankedSentence], k: int = RRF_K) -> list[RankedSentence]:
@@ -140,7 +146,13 @@ def _rrf(dense: list[RankedSentence], sparse: list[RankedSentence], k: int = RRF
         all_sents[s.id] = s
     ranked = sorted(scores.items(), key=operator.itemgetter(1), reverse=True)
     return [
-        RankedSentence(id=all_sents[sid].id, atom_id=all_sents[sid].atom_id, sentence_idx=all_sents[sid].sentence_idx, raw_text=all_sents[sid].raw_text, score=sc)
+        RankedSentence(
+            id=all_sents[sid].id,
+            atom_id=all_sents[sid].atom_id,
+            sentence_idx=all_sents[sid].sentence_idx,
+            raw_text=all_sents[sid].raw_text,
+            score=sc,
+        )
         for sid, sc in ranked
     ]
 
@@ -149,7 +161,10 @@ def _rerank(query: str, results: list[RankedSentence], top_k: int) -> list[Ranke
     pairs = [(query, r.raw_text) for r in results]
     scores = load_reranker().predict(pairs)
     reranked = sorted(zip(results, scores, strict=False), key=operator.itemgetter(1), reverse=True)
-    return [RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=float(s)) for r, s in reranked[:top_k]]
+    return [
+        RankedSentence(id=r.id, atom_id=r.atom_id, sentence_idx=r.sentence_idx, raw_text=r.raw_text, score=float(s))
+        for r, s in reranked[:top_k]
+    ]
 
 
 async def retrieve(

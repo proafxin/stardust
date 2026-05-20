@@ -9,7 +9,8 @@ from typing import Any
 import cupy
 import numpy as np
 import torch
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text
+
 from stardust.config import EMBEDDING_BATCH_SIZE, EMBEDDING_INTERNAL_BATCH_SIZE
 from stardust.db import SessionLocal
 from stardust.extract import embed_sentences, extract_sentences, resolve_pronouns
@@ -44,7 +45,7 @@ async def phase_normalize() -> None:
 
     for dataset, data_path, id_prefix in DATASETS:
         i = 0
-        with open(data_path) as f:
+        with Path(data_path).open(encoding="utf-8") as f:
             records = json.load(f)
         for record in records:
             if N and i >= N:
@@ -81,7 +82,13 @@ async def phase_nlp_embed() -> None:
     atom_data: list[tuple[int, str, list[tuple[int, int, str]]]] = []
     async with SessionLocal() as session, session.begin():
         stream = await session.stream(
-            select(Atom.id, TreeNode.value.label("ancestry"), Sentence.id.label("sent_id"), Sentence.sentence_idx, Sentence.raw_text)
+            select(
+                Atom.id,
+                TreeNode.value.label("ancestry"),
+                Sentence.id.label("sent_id"),
+                Sentence.sentence_idx,
+                Sentence.raw_text,
+            )
             .join(TreeNode, TreeNode.id == Atom.parent_id)
             .join(Sentence, Sentence.atom_id == Atom.id)
             .order_by(Atom.id, Sentence.sentence_idx)
@@ -115,22 +122,25 @@ async def phase_nlp_embed() -> None:
     done = embedded = updated = 0
 
     for batch_start in range(0, len(atom_data), EMBEDDING_BATCH_SIZE):
-        batch_atoms = atom_data[batch_start:batch_start + EMBEDDING_BATCH_SIZE]
-        batch_sent_results = all_sent_results[batch_start:batch_start + EMBEDDING_BATCH_SIZE]
+        batch_atoms = atom_data[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
+        batch_sent_results = all_sent_results[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
 
         all_embed_texts: list[str] = []
         for (_, ancestry, sents), _ in zip(batch_atoms, batch_sent_results, strict=False):
-            for (_, _, raw_text) in sents:
+            for _, _, raw_text in sents:
                 all_embed_texts.append(f"{ancestry} | {raw_text}" if ancestry else raw_text)
 
-        vecs_list = [embed_sentences(all_embed_texts[i:i + EMBEDDING_INTERNAL_BATCH_SIZE], embedder) for i in range(0, len(all_embed_texts), EMBEDDING_INTERNAL_BATCH_SIZE)]
+        vecs_list = [
+            embed_sentences(all_embed_texts[i : i + EMBEDDING_INTERNAL_BATCH_SIZE], embedder)
+            for i in range(0, len(all_embed_texts), EMBEDDING_INTERNAL_BATCH_SIZE)
+        ]
         vecs = np.concatenate(vecs_list, axis=0)
 
         vec_idx = 0
         sent_vecs_map: dict[int, np.ndarray] = {}
         async with SessionLocal() as write_session:
             for (_, ancestry, sents), sent_results in zip(batch_atoms, batch_sent_results, strict=False):
-                for (sent_id, sent_idx, raw_text), _ in zip(sents, sent_results, strict=False):
+                for (sent_id, _sent_idx, raw_text), _ in zip(sents, sent_results, strict=False):
                     embed_text = all_embed_texts[vec_idx]
                     new_hash = hashlib.sha256(embed_text.encode()).hexdigest()
                     await update_sentence_embedding(sent_id, embed_text, new_hash, vecs[vec_idx], write_session)
@@ -159,7 +169,12 @@ async def phase_nlp_embed() -> None:
 
         torch.cuda.empty_cache()
         done += sum(len(sents) for _, _, sents in batch_atoms)
-        log.info("phase 2: %d sentences embedded, %d resolved, VRAM free %.2fGB", done, updated, torch.cuda.mem_get_info()[0] / 1024**3)
+        log.info(
+            "phase 2: %d sentences embedded, %d resolved, VRAM free %.2fGB",
+            done,
+            updated,
+            torch.cuda.mem_get_info()[0] / 1024**3,
+        )
 
     async with SessionLocal() as session:
         await session.execute(

@@ -19,7 +19,7 @@ async def _process(record: dict) -> tuple[str, str, list, dict[str, float] | Non
     qid = record["_id"]
     question = record["question"]
     supporting = {(title, sent_idx) for title, sent_idx in record["supporting_facts"]}
-    context_map = {title: sents for title, sents in record["context"]}
+    context_map = dict(record["context"])
 
     async with SessionLocal() as session:
         results = await retrieve(question, session, top_k=TOP_K, rerank_top_k=TOP_K)
@@ -42,7 +42,7 @@ async def _process(record: dict) -> tuple[str, str, list, dict[str, float] | Non
 
 
 async def run_async() -> dict:
-    with open(DEV_PATH) as f:
+    with Path(DEV_PATH).open(encoding="utf-8") as f:
         dev = json.load(f)
     if N:
         dev = dev[:N]
@@ -59,7 +59,7 @@ async def run_async() -> dict:
         if metrics:
             all_metrics.append(metrics)
 
-    PRED_PATH.write_text(json.dumps({"answer": answer_pred, "sp": sp_pred}))
+    PRED_PATH.write_text(json.dumps({"answer": answer_pred, "sp": sp_pred}), encoding="utf-8")
     log.info("predictions written to %s", PRED_PATH)
 
     agg = {**aggregate_metrics(all_metrics), "n": len(all_metrics)}
