@@ -4,7 +4,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from spacy.tokens import Doc
 
-from stardust.config import EMBEDDING_INTERNAL_BATCH_SIZE, NLP_BATCH_SIZE
+from stardust.config import NLP_BATCH_SIZE
 from stardust.registry import nlp as load_nlp
 
 log = logging.getLogger(__name__)
@@ -62,7 +62,6 @@ def resolve_atoms(
 def embed_sentences(texts: list[str], embedder: SentenceTransformer) -> np.ndarray:
     return embedder.encode(
         texts,
-        batch_size=EMBEDDING_INTERNAL_BATCH_SIZE,
         normalize_embeddings=True,
         show_progress_bar=False,
         convert_to_numpy=True,

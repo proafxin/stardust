@@ -13,7 +13,7 @@ from stardust.config import EMBEDDING_MODEL, RERANKER_MODEL, SPACY_MODEL
 @cache
 def nlp() -> Language:
     spacy.prefer_gpu()
-    return spacy.load(SPACY_MODEL)
+    return spacy.load(SPACY_MODEL, disable=["lemmatizer", "ner", "attribute_ruler"])
 
 
 def unload_nlp() -> None:
