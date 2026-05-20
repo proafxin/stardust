@@ -13,33 +13,40 @@ def run_nlp(sentences: list[str]) -> list[tuple[bool, list[str]]]:
 
 def _analyze_doc(doc: Doc) -> tuple[bool, list[str]]:
     propn_texts = [t.text for t in doc if t.pos_ == "PROPN"]
+    propn_set = {t for t in doc if t.pos_ == "PROPN"}
     has_unresolved = any(
-        t.pos_ == "PRON" and not any(t2.pos_ == "PROPN" and (t.head in {t2, t2.head}) for t2 in doc) for t in doc
+        t.pos_ == "PRON" and not (propn_set & ({t.head} | set(t.children) | set(t.head.children)))
+        for t in doc
     )
     return has_unresolved, propn_texts
 
 
 def resolve_atoms(
-    atoms: list[tuple[list[str], list[str], list[tuple[bool, list[str]]]]],
+    atoms: list[tuple[list[str], list[str], list[tuple[bool, list[str]]], list[int]]],
     all_vecs: np.ndarray,
 ) -> tuple[list[list[str]], int]:
     resolvable = 0
     results: list[list[str]] = []
     offset = 0
-    for raw_texts, resolved_texts, nlp_results in atoms:
-        n = len(raw_texts)
+    for raw_texts, resolved_texts, nlp_results, embed_indices in atoms:
+        n = len(embed_indices)
         sent_vecs = all_vecs[offset : offset + n]
         offset += n
-        propn_indices = [i for i, (_, propns) in enumerate(nlp_results) if propns]
+        # map embed position -> original sentence index
+        embed_pos = {orig_i: pos for pos, orig_i in enumerate(embed_indices)}
+        propn_positions = [pos for pos, orig_i in enumerate(embed_indices) if nlp_results[orig_i][1]]
         final_resolved = list(resolved_texts)
-        for i, (has_unresolved, _) in enumerate(nlp_results):
-            if not has_unresolved or not propn_indices:
+        for orig_i, (has_unresolved, _) in enumerate(nlp_results):
+            if not has_unresolved or orig_i not in embed_pos:
                 continue
-            scores = np.array([float(sent_vecs[i] @ sent_vecs[j]) for j in propn_indices])
-            best_j = propn_indices[int(np.argmax(scores))]
-            if best_j == i:
+            candidates = [pos for pos in propn_positions if pos != embed_pos[orig_i]]
+            if not candidates:
                 continue
-            final_resolved[i] = f"{resolved_texts[i]} {' '.join(nlp_results[best_j][1])}"
+            i_pos = embed_pos[orig_i]
+            scores = np.array([float(sent_vecs[i_pos] @ sent_vecs[pos]) for pos in candidates])
+            best_pos = candidates[int(np.argmax(scores))]
+            best_orig = embed_indices[best_pos]
+            final_resolved[orig_i] = f"{resolved_texts[orig_i]} {' '.join(nlp_results[best_orig][1])}"
             resolvable += 1
         results.append(final_resolved)
     return results, resolvable

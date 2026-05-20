@@ -121,16 +121,17 @@ def resolve_pronouns(
     embedder = load_embedder()
     log.info("resolve: embedder loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
-    atoms_data: list[tuple[list[str], list[str], list[tuple[bool, list[str]]]]] = []
+    atoms_data: list[tuple[list[str], list[str], list[tuple[bool, list[str]]], list[int]]] = []
     atom_keys: list[tuple[int, int]] = []
     all_raw_texts: list[str] = []
     for (rec_i, atom_i), sent_nlp in needs_resolution:
         sentences = all_records[rec_i][3][atom_i]
         raw_texts = [raw for raw, _ in sentences]
         resolved_texts = [resolved for _, resolved in sentences]
-        atoms_data.append((raw_texts, resolved_texts, sent_nlp))
+        embed_indices = [i for i, (hu, propns) in enumerate(sent_nlp) if hu or propns]
+        atoms_data.append((raw_texts, resolved_texts, sent_nlp, embed_indices))
         atom_keys.append((rec_i, atom_i))
-        all_raw_texts.extend(raw_texts)
+        all_raw_texts.extend(raw_texts[i] for i in embed_indices)
 
     token_budget = _load_token_budget()
     all_vecs = embed_with_token_budget(all_raw_texts, embedder, token_budget)
