@@ -20,7 +20,9 @@ def _analyze_doc(doc: Doc) -> tuple[bool, list[str]]:
     propn_texts = [t.text for t in doc if t.pos_ == "PROPN"]
     propn_ids = {t.i for t in doc if t.pos_ == "PROPN"}
     has_unresolved = any(
-        t.pos_ == "PRON" and not (propn_ids & ({t.head.i} | {c.i for c in t.children} | {c.i for c in t.head.children}))
+        t.pos_ == "PRON"
+        and t.dep_ != "expl"
+        and not (propn_ids & ({t.head.i} | {c.i for c in t.children} | {c.i for c in t.head.children}))
         for t in doc
     )
     return has_unresolved, propn_texts
