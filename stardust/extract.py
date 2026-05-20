@@ -1,9 +1,13 @@
+import logging
+
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from spacy.tokens import Doc
 
 from stardust.config import EMBEDDING_INTERNAL_BATCH_SIZE, NLP_BATCH_SIZE
 from stardust.registry import nlp as load_nlp
+
+log = logging.getLogger(__name__)
 
 
 def run_nlp(sentences: list[str]) -> list[tuple[bool, list[str]]]:
