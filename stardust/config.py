@@ -21,11 +21,11 @@ class Settings(BaseSettings):
         )
 
 
-SPACY_MODEL = "en_core_web_trf"
+SPACY_MODEL = "en_core_web_lg"
 EMBEDDING_MODEL = "BAAI/bge-m3"
 EMBEDDING_DIM = 1024
 RERANKER_MODEL = "mixedbread-ai/mxbai-rerank-base-v2"
-NLP_BATCH_SIZE = 2048
+NLP_BATCH_SIZE = 8192
 RRF_K = 60
 CANONICALIZATION_THRESHOLD = 0.92
 NUMERIC_ENTITY_TYPES = {"DATE", "TIME", "CARDINAL", "ORDINAL", "PERCENT", "MONEY", "QUANTITY"}
