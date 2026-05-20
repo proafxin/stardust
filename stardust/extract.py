@@ -13,7 +13,7 @@ _PRON = re.compile(r"\b(he|she|it|they|him|her|them|his|hers|its|their|theirs|hi
 def resolve_atoms_coref(
     atoms: list[tuple[list[str], str]],
     coref_model: LingMessCoref,
-    max_tokens_in_batch: int = 10000,
+    max_tokens_in_batch: int = 20000,
 ) -> list[list[tuple[str, str]]]:
     atom_texts = [" ".join(sents) for sents, _ in atoms]
     preds = coref_model.predict(texts=atom_texts, max_tokens_in_batch=max_tokens_in_batch)

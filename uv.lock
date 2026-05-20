@@ -675,8 +675,8 @@ wheels = [
 
 [[package]]
 name = "fastcoref"
-version = "2.1.7"
-source = { git = "https://github.com/proafxin/fastcoref?branch=main#33ff3fc6f9908cb54b93eb9217873b99536c4783" }
+version = "2.2.0"
+source = { git = "https://github.com/proafxin/fastcoref?branch=main#97b9e47b0460e0744c2677b87507be4a788555e8" }
 dependencies = [
     { name = "datasets" },
     { name = "en-core-web-sm" },

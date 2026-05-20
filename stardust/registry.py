@@ -10,7 +10,9 @@ from stardust.config import COREF_MODEL, EMBEDDING_MODEL, RERANKER_MODEL
 
 @cache
 def coref() -> LingMessCoref:
-    return LingMessCoref(model_name_or_path=COREF_MODEL, device="cuda")
+    model = LingMessCoref(model_name_or_path=COREF_MODEL, device="cuda", enable_progress_bar=False)
+    model.model = torch.compile(model.model)
+    return model
 
 
 def unload_coref() -> None:
