@@ -7,7 +7,7 @@ from sqlalchemy import cast, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardust.config import RRF_K
-from stardust.models import Atom, Sentence, TableRow, TableSignal, TreeNode
+from stardust.models import Atom, Sentence, TreeNode
 from stardust.registry import embedder as load_embedder
 from stardust.registry import reranker as load_reranker
 from stardust.tree.atom import Node
@@ -74,25 +74,6 @@ async def insert_sentences(
             }
             for i, (raw, resolved, tc, value_hash, vec) in enumerate(sentences)
         ],
-    )
-
-
-async def insert_table_signal(
-    record_id: str, title: str, col_names: list[str], row_count: int, session: AsyncSession
-) -> int:
-    result = await session.execute(
-        insert(TableSignal)
-        .values(record_id=record_id, title=title, col_names=col_names, row_count=row_count)
-        .returning(TableSignal.id)
-    )
-    return result.scalar_one()
-
-
-async def insert_table_rows(rows: list[tuple[int, int, int, str]], session: AsyncSession) -> None:
-    if not rows:
-        return
-    await session.execute(
-        insert(TableRow), [{"signal_id": s, "row_idx": r, "col_idx": c, "cell_value": v} for s, r, c, v in rows]
     )
 
 

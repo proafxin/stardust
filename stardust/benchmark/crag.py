@@ -20,7 +20,7 @@ async def _process(record: dict, domain: str, i: int) -> dict[str, float] | None
         return None
     async for session in get_session():
         results = await retrieve(record["query"], session, top_k=10, rerank_top_k=10)
-    relevant = {r.id for r in results if answer.lower() in r.value.lower()}
+    relevant = {r.id for r in results if answer.lower() in r.raw_text.lower()}
     if not relevant:
         log.warning("no relevant atoms for query: %s", record["query"][:60])
         return None

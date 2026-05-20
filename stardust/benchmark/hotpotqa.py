@@ -29,10 +29,10 @@ async def _process(record: dict) -> tuple[str, str, list, dict[str, float] | Non
 
     for r in results:
         for title, sent_idx in supporting:
-            if title not in r.value:
+            if title not in r.raw_text:
                 continue
             sents = context_map.get(title, [])
-            if sent_idx < len(sents) and sents[sent_idx].strip() in r.value:
+            if sent_idx < len(sents) and sents[sent_idx].strip() in r.raw_text:
                 if [title, sent_idx] not in sp_pred:
                     sp_pred.append([title, sent_idx])
                 relevant.add(r.id)

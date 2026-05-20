@@ -17,8 +17,7 @@ from stardust.extract import embed_sentences, resolve_atom, run_nlp
 from stardust.parse import normalize_hotpotqa
 from stardust.query import insert_index, insert_sentences
 from stardust.registry import embedder as load_embedder
-from stardust.registry import nlp as load_nlp
-from stardust.registry import unload_embedder, unload_nlp, unload_reranker
+from stardust.registry import unload_embedder, unload_nlp
 
 TUNING_PATH = Path("tuning.json")
 
@@ -90,7 +89,7 @@ def run_spacy(all_records: list[_RawRecord]) -> dict[tuple[int, int], list[tuple
     log.info("spaCy: processing %d sentences in chunks of %d", total, NLP_BATCH_SIZE)
     nlp_results: list[tuple[bool, list[str]]] = []
     for start in range(0, total, NLP_BATCH_SIZE):
-        chunk = flat_raw[start: start + NLP_BATCH_SIZE]
+        chunk = flat_raw[start : start + NLP_BATCH_SIZE]
         nlp_results.extend(run_nlp(chunk))
         log.info("spaCy: %d/%d sentences done", min(start + NLP_BATCH_SIZE, total), total)
     log.info("spaCy: done")
@@ -165,7 +164,13 @@ def embed_and_finalize(all_records: list[_RawRecord]) -> list[_FinalRecord]:
             for j, vec in zip(batch_indices, vecs, strict=False):
                 all_vecs[j] = vec
             batches_done += 1
-            log.info("embed: batch %d done (%d sentences, %d tokens), VRAM free %.2fGB", batches_done, len(batch_indices), batch_tokens, torch.cuda.mem_get_info()[0] / 1024**3)
+            log.info(
+                "embed: batch %d done (%d sentences, %d tokens), VRAM free %.2fGB",
+                batches_done,
+                len(batch_indices),
+                batch_tokens,
+                torch.cuda.mem_get_info()[0] / 1024**3,
+            )
             batch_indices, batch_tokens = [], 0
         batch_indices.append(i)
         batch_tokens += tc
@@ -174,12 +179,22 @@ def embed_and_finalize(all_records: list[_RawRecord]) -> list[_FinalRecord]:
         for j, vec in zip(batch_indices, vecs, strict=False):
             all_vecs[j] = vec
         batches_done += 1
-        log.info("embed: batch %d done (%d sentences, %d tokens), VRAM free %.2fGB", batches_done, len(batch_indices), batch_tokens, torch.cuda.mem_get_info()[0] / 1024**3)
+        log.info(
+            "embed: batch %d done (%d sentences, %d tokens), VRAM free %.2fGB",
+            batches_done,
+            len(batch_indices),
+            batch_tokens,
+            torch.cuda.mem_get_info()[0] / 1024**3,
+        )
 
     unload_embedder()
     gc.collect()
     torch.cuda.empty_cache()
-    log.info("embed: done (%d batches), embedder unloaded, VRAM free %.2fGB", batches_done, torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info(
+        "embed: done (%d batches), embedder unloaded, VRAM free %.2fGB",
+        batches_done,
+        torch.cuda.mem_get_info()[0] / 1024**3,
+    )
 
     vec_map: dict[tuple[int, int, int], tuple[int, np.ndarray]] = {
         (rec_i, atom_i, sent_i): (all_token_counts[fi], all_vecs[fi])
@@ -247,7 +262,6 @@ async def build_hnsw_index() -> None:
 async def main() -> None:
     log.info("stardust index: start")
     unload_embedder()
-    unload_reranker()
     unload_nlp()
     gc.collect()
     cupy.get_default_memory_pool().free_all_blocks()
@@ -273,7 +287,6 @@ async def main() -> None:
     await build_hnsw_index()
 
     unload_embedder()
-    unload_reranker()
     unload_nlp()
     gc.collect()
     torch.cuda.empty_cache()

@@ -4,18 +4,8 @@ import unicodedata
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import unquote
 
 from stardust.tree.atom import Modality, Node
-
-
-def clean_value(value: str) -> str:
-    raw = value.rsplit(" | ", 1)[-1] if " | " in value else value
-    raw = re.sub(r"\b[0-9a-f]{32}\b", "", raw)
-    raw = re.sub(r"https?%3A%2F%2F\S+", "", raw)
-    raw = re.sub(r"https?://\S+", "", raw)
-    return re.sub(r"\s+", " ", raw).strip()
-
 
 HOTPOTQA_LEVELS = ["corpus", "record", "document", "text"]
 
@@ -55,76 +45,6 @@ def _make_node(
         value=value,
         terminal=terminal,
     )
-
-
-@dataclass
-class TableData:
-    title: str
-    col_names: list[str]
-    row_count: int
-    rows: list[str]
-
-
-_MD_NOISE = re.compile(r"!?\[[^\]]*\]\([^)]*\)")
-
-
-def _cell_text(cell: str) -> str:
-    return re.sub(r"\s+", " ", _MD_NOISE.sub("", cell)).strip()
-
-
-def _clean_filename(filename: str) -> str:
-    s = re.sub(r"^[0-9a-f]{32}-", "", filename)
-    s = unquote(s)
-    m = re.search(r"https?://[^/]+(/.*)", s)
-    if m:
-        s = m.group(1)
-    s = re.sub(r"[/_-]+", " ", s)
-    s = re.sub(r"\.[a-z]{2,4}$", "", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _parse_md_tables(markdown: str, last_heading: str = "") -> list[TableData]:
-    tables: list[TableData] = []
-    lines = markdown.splitlines()
-    i = 0
-    current_heading = last_heading
-    while i < len(lines):
-        line = lines[i]
-        if re.match(r"#+\s+", line):
-            current_heading = re.sub(r"^#+\s+", "", line).strip()
-            i += 1
-            continue
-        if not re.match(r"\s*\|", line):
-            i += 1
-            continue
-        block: list[str] = []
-        while i < len(lines) and re.match(r"\s*\|", lines[i]):
-            block.append(lines[i])
-            i += 1
-        if len(block) < 2:
-            continue
-        sep_idx = next((j for j, row in enumerate(block) if re.match(r"\s*\|[\s\-:|]+\|", row)), None)
-        if sep_idx is None:
-            continue
-        header_line = block[sep_idx - 1] if sep_idx > 0 else block[0]
-        col_names = [_cell_text(c) for c in header_line.strip("|\n ").split("|")]
-        col_names = [c for c in col_names if c]
-        if not col_names:
-            continue
-        data_rows = [row for j, row in enumerate(block) if j != sep_idx and (sep_idx == 0 or j != sep_idx - 1)]
-        rows: list[str] = []
-        for row_line in data_rows:
-            cells = [_cell_text(c) for c in row_line.strip("|\n ").split("|")]
-            cells = cells[: len(col_names)]
-            while len(cells) < len(col_names):
-                cells.append("")
-            if not any(cells):
-                continue
-            rows.append(" | ".join(f"{col_names[k]}: {cells[k]}" for k in range(len(col_names)) if cells[k]))
-        if not rows:
-            continue
-        tables.append(TableData(title=current_heading, col_names=col_names, row_count=len(rows), rows=rows))
-    return tables
 
 
 async def normalize_hotpotqa(record: dict[str, Any], record_id: str) -> AsyncGenerator[ParsedNode]:

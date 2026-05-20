@@ -2,7 +2,6 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -61,21 +60,3 @@ class Sentence(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
-
-
-class TableSignal(Base):
-    __tablename__ = "table_signals"
-
-    record_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    col_names: Mapped[list] = mapped_column(JSONB, nullable=False)
-    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
-
-
-class TableRow(Base):
-    __tablename__ = "table_rows"
-
-    signal_id: Mapped[int] = mapped_column(Integer, ForeignKey("table_signals.id"), nullable=False, index=True)
-    row_idx: Mapped[int] = mapped_column(Integer, nullable=False)
-    col_idx: Mapped[int] = mapped_column(Integer, nullable=False)
-    cell_value: Mapped[str] = mapped_column(Text, nullable=False)

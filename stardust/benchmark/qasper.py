@@ -21,7 +21,7 @@ async def _process(record: dict, i: int) -> list[dict[str, float]]:
             if not ans_texts:
                 continue
             results = await retrieve(q, session, top_k=10, rerank_top_k=10)
-            relevant = {r.id for r in results if any(ans.lower() in r.value.lower() for ans in ans_texts)}
+            relevant = {r.id for r in results if any(ans.lower() in r.raw_text.lower() for ans in ans_texts)}
             if not relevant:
                 log.warning("no relevant atoms for question: %s", q[:60])
                 continue
