@@ -128,7 +128,8 @@ def resolve_pronouns(
         sentences = all_records[rec_i][3][atom_i]
         raw_texts = [raw for raw, _ in sentences]
         resolved_texts = [resolved for _, resolved in sentences]
-        embed_indices = [i for i, (unresolved_morphs, propns) in enumerate(sent_nlp) if unresolved_morphs or propns]        atoms_data.append((raw_texts, resolved_texts, sent_nlp, embed_indices))
+        embed_indices = [i for i, (unresolved_morphs, propns) in enumerate(sent_nlp) if unresolved_morphs or propns]
+        atoms_data.append((raw_texts, resolved_texts, sent_nlp, embed_indices))
         atom_keys.append((rec_i, atom_i))
         all_raw_texts.extend(raw_texts[i] for i in embed_indices)
 
