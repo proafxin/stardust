@@ -27,9 +27,10 @@ def resolve_atom(
     resolved_texts: list[str],
     nlp_results: list[tuple[bool, list[str]]],
     sent_vecs: np.ndarray,
-) -> list[str]:
+) -> tuple[list[str], int]:
     propn_indices = [i for i, (_, propns) in enumerate(nlp_results) if propns]
     final_resolved = list(resolved_texts)
+    resolvable = 0
     for i, (has_unresolved, _) in enumerate(nlp_results):
         if not has_unresolved or not propn_indices:
             continue
@@ -39,7 +40,8 @@ def resolve_atom(
             continue
         referent_propns = nlp_results[best_j][1]
         final_resolved[i] = f"{resolved_texts[i]} {' '.join(referent_propns)}"
-    return final_resolved
+        resolvable += 1
+    return final_resolved, resolvable
 
 
 def embed_sentences(texts: list[str], embedder: SentenceTransformer) -> np.ndarray:

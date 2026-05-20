@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from sqlalchemy import text
 
+from stardust.config import NLP_BATCH_SIZE
 from stardust.db import SessionLocal
 from stardust.extract import embed_sentences, resolve_atom, run_nlp
 from stardust.parse import normalize_hotpotqa
@@ -85,8 +86,13 @@ def run_spacy(all_records: list[_RawRecord]) -> dict[tuple[int, int], list[tuple
                 flat_raw.append(raw)
                 flat_index.append((rec_i, atom_i))
 
-    log.info("spaCy: running on %d sentences", len(flat_raw))
-    nlp_results = run_nlp(flat_raw)
+    total = len(flat_raw)
+    log.info("spaCy: processing %d sentences in chunks of %d", total, NLP_BATCH_SIZE)
+    nlp_results: list[tuple[bool, list[str]]] = []
+    for start in range(0, total, NLP_BATCH_SIZE):
+        chunk = flat_raw[start: start + NLP_BATCH_SIZE]
+        nlp_results.extend(run_nlp(chunk))
+        log.info("spaCy: %d/%d sentences done", min(start + NLP_BATCH_SIZE, total), total)
     log.info("spaCy: done")
 
     atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]] = {}
@@ -103,22 +109,34 @@ def resolve_pronouns(
     atom_nlp: dict[tuple[int, int], list[tuple[bool, list[str]]]],
 ) -> list[_RawRecord]:
     needs_resolution = [(k, v) for k, v in atom_nlp.items() if any(hu for hu, _ in v)]
-    log.info("resolve: %d atoms need pronoun resolution", len(needs_resolution))
+    total_unresolved_sents = sum(sum(1 for hu, _ in v if hu) for _, v in needs_resolution)
+    log.info(
+        "resolve: %d atoms need resolution, %d unresolved sentences total",
+        len(needs_resolution),
+        total_unresolved_sents,
+    )
     embedder = load_embedder()
     log.info("resolve: embedder loaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
 
+    resolvable = 0
     for (rec_i, atom_i), sent_nlp in needs_resolution:
         sentences = all_records[rec_i][3][atom_i]
         raw_texts = [raw for raw, _ in sentences]
         resolved_texts = [resolved for _, resolved in sentences]
         raw_vecs = embed_sentences(raw_texts, embedder)
-        updated = resolve_atom(raw_texts, resolved_texts, sent_nlp, raw_vecs)
+        updated, atom_resolvable = resolve_atom(raw_texts, resolved_texts, sent_nlp, raw_vecs)
+        resolvable += atom_resolvable
         all_records[rec_i][3][atom_i] = list(zip(raw_texts, updated, strict=False))
 
     unload_embedder()
     gc.collect()
     torch.cuda.empty_cache()
-    log.info("resolve: done, embedder unloaded, VRAM free %.2fGB", torch.cuda.mem_get_info()[0] / 1024**3)
+    log.info(
+        "resolve: %d/%d sentences have a candidate referent sentence, embedder unloaded, VRAM free %.2fGB",
+        resolvable,
+        total_unresolved_sents,
+        torch.cuda.mem_get_info()[0] / 1024**3,
+    )
     return all_records
 
 
