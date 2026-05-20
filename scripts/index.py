@@ -139,6 +139,8 @@ def resolve_pronouns(
         updated_list, resolvable = resolve_atoms(atoms_data, all_vecs)
         for (rec_i, atom_i), updated, (raw_texts, _, _, _) in zip(atom_keys, updated_list, atoms_data, strict=False):
             all_records[rec_i][3][atom_i] = list(zip(raw_texts, updated, strict=False))
+    else:
+        resolvable = 0
 
     unload_embedder()
     gc.collect()
